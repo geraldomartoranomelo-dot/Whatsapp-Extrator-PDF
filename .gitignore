@@ -1,0 +1,6 @@
+﻿node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+PDFS_Baixados/
+qr.png
+*.log
