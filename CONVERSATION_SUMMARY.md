@@ -1,6 +1,6 @@
 # 🤖 Resumo do Projeto: Extrator de PDFs WhatsApp (Pro)
 
-Este arquivo serve como "ponte de memória" para que futuras conversas de IA saibam exatamente o estado atual do projeto na pasta `D:\teste pode apagar`.
+Este arquivo serve como "ponte de memória" para que futuras conversas de IA saibam exatamente o estado atual do projeto.
 
 ---
 
@@ -9,35 +9,32 @@ Este arquivo serve como "ponte de memória" para que futuras conversas de IA sai
 O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashboard interativo.
 
 ### 🛠️ Funcionalidades Implementadas:
-1.  **Dashboard Automático:** Inicia um servidor Express na porta `3002`.
-2.  **Modo Standby:** Robô otimizado (Puppeteer) para consumir mínima CPU/RAM enquanto não está processando.
-3.  **Memória de Sessão:** O WhatsApp salva a conexão localmente; não é necessário ler QR Code toda vez.
-4.  **Busca Multi-Data:** O usuário pode selecionar várias datas individuais no calendário (Flatpickr) para varredura simultânea.
-5.  **Agendamentos Persistentes:** 
-    -   Sistema de agendamento por dias da semana e horário exato.
-    -   Salvo no arquivo `schedules.json` (sobrevive a reinicializações).
-    -   Gerenciamento direto no dashboard (criar/excluir).
-6.  **Histórico e Gestão de Arquivos:** 
-    -   Lista todos os PDFs baixados ao abrir/atualizar a página.
-    -   Nomes de arquivos únicos (evita sobrescrever PDFs de nomes iguais).
-    -   Seleção individual ou em massa ("Selecionar Todos") para exclusão via Dashboard.
+1.  **Dashboard Automático:** Servidor Express na porta `3002`.
+2.  **Autolimpeza:** O arquivo `1 - INICIAR SISTEMA.bat` fecha processos `node.exe` antigos antes de iniciar o novo (evita cache de código).
+3.  **Memória de Sessão:** Persistência de login via `LocalAuth`.
+4.  **Busca Multi-Data:** Seleção de várias datas para varredura manual rápida.
+5.  **Agendamentos Híbridos (V3):** 
+    -   **Recorrente:** Por dias da semana com nomes legíveis (Seg, Ter, etc.).
+    -   **Fixos:** Por datas específicas em um calendário dedicado na aba Agendar.
+    -   Persistente no arquivo `schedules.json`.
+6.  **Gestão de PDFs:** Listagem, contagem e exclusão direta pelo dashboard.
+7.  **UX Corrigida:** Barra de progresso com auto-hide após conclusão (sem alertas bloqueantes).
 
 ### 📁 Arquivos Chave:
--   `index.js`: Contém toda a lógica do Node.js/Socket.io/WhatsApp.
--   `PDFS_Baixados/`: Pasta onde os arquivos são armazenados fisicamente.
--   `schedules.json`: Banco de dados dos agendamentos programados.
--   `.gitignore`: Configurada para proteger a pasta de PDFs e credenciais.
+-   `index.js`: Motor do sistema (Express, Socket.io, Puppeteer).
+-   `PDFS_Baixados/`: Pasta de armazenamento dos arquivos.
+-   `schedules.json`: Banco de dados dos agendamentos.
+-   `1 - INICIAR SISTEMA.bat`: Inicializador inteligente.
 
-### 📌 Comandos Úteis:
--   `npm start` ou `node index.js` para ligar.
--   `http://localhost:3002` para acessar o Dashboard.
-
----
-
-## ⏭️ Próximas Melharas Sugeridas:
--   Filtro por palavra-chave no nome do arquivo (ex: baixar apenas "Boleto").
--   Exibir QR Code diretamente no Dashboard (atualmente é o arquivo `qr.png`).
--   Barra de progresso detalhada durante varreduras longas.
+### 📌 Git e GitHub:
+-   Repositório: `geraldomartoranomelo-dot/Whatsapp-Extrator-PDF`
+-   Branch principal: `main` (Sincronizado com as melhorias de hoje).
 
 ---
-**Nota para a IA:** Leia o `index.js` para entender a estrutura de rotas e o motor do Puppeteer antes de sugerir mudanças. O Git já foi inicializado e comitado com as mudanças acima.
+
+## ⏭️ Próximos Passos Sugeridos:
+-   Filtro por palavra-chave no nome do arquivo.
+-   Exibir QR Code diretamente no Dashboard HTML.
+
+---
+**Nota para a IA:** O Git foi atualizado com as funções de `cronTimes` (plural). Puxar do GitHub ao iniciar nova thread.
