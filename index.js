@@ -7,6 +7,29 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cron = require('node-cron');
 
+function cleanSessionData() {
+    const sessionDir = path.join(__dirname, '.wwebjs_auth', 'session', 'Default');
+    const dirsToDelete = [
+        'Cache',
+        'Code Cache',
+        'Service Worker/CacheStorage',
+        'Service Worker/ScriptCache',
+        'GPUCache'
+    ];
+    
+    if (fs.existsSync(sessionDir)) {
+        console.log('[Otimização] Limpando pastas de cache pesadas antes de iniciar...');
+        dirsToDelete.forEach(dir => {
+            const p = path.join(sessionDir, dir);
+            if (fs.existsSync(p)) {
+                try {
+                    fs.rmSync(p, { recursive: true, force: true });
+                } catch (e) {}
+            }
+        });
+    }
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -14,6 +37,8 @@ const io = new Server(server);
 io.on('connection', (socket) => {
     if (isReady) {
         socket.emit('status', { message: 'Pronto p/ Uso', type: 'success' });
+    } else {
+        socket.emit('status', { message: 'Conectando...', type: 'warning' });
     }
 });
 
@@ -80,6 +105,7 @@ function loadSchedules() {
 client.on('qr', async (qr) => {
     const filePath = path.join(__dirname, 'qr.png');
     await QRCode.toFile(filePath, qr);
+    console.log('--- NOVO QR CODE GERADO. ESCANEIE POR FAVOR ---');
     io.emit('status', { message: 'Aguardando QR Code...', type: 'warning' });
 });
 
@@ -87,11 +113,12 @@ client.on('ready', () => {
     isReady = true;
     const filePath = path.join(__dirname, 'qr.png');
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    console.log('--- WHATSAPP PRONTO PARA USO ---');
     io.emit('status', { message: 'WhatsApp Conectado!', type: 'success' });
 });
 
 const executeDownload = async (groupName, targetDates) => {
-    if (!isReady) return { success: false, message: 'WhatsApp não está pronto!' };
+    if (!isReady) return { success: false, message: 'O WhatsApp não está conectado. Por favor, aguarde ou escaneie o QR Code.' };
 
     try {
         const chats = await client.getChats();
@@ -156,20 +183,18 @@ app.get('/', (req, res) => {
                 
                 button { width: 100%; padding: 12px; margin-top: 5px; background: var(--primary); color: white; border: none; border-radius: 6px; font-size: 0.9rem; cursor: pointer; font-weight: 600; transition: 0.2s; }
                 button:hover { background: #128c7e; }
-                button:disabled { background: #ccc; cursor: not-allowed; }
+                button:disabled { background: #ebd9d9ff; cursor: not-allowed; }
                 .btn-secondary { background: #6c757d; }
                 .btn-secondary:hover { background: #5a6268; }
                 .btn-danger { background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; }
                 .btn-danger:hover { background: #dc2626; }
 
-                /* Abas (Tabs) */
                 .tabs { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 20px; gap: 10px;}
                 .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-weight: 600; color: #888; font-size: 0.85rem; transition: 0.2s; border-radius: 6px 6px 0 0; background: #e9ecef;}
                 .tab.active { color: #fff; background: var(--primary); border-bottom-color: var(--primary); }
                 .tab-content { display: none; }
                 .tab-content.active { display: block; animation: fadeIn 0.3s; }
 
-                /* Checkboxes Dias da Semana */
                 .days-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
                 .days-grid label { font-size: 0.8rem; font-weight: 500; display:flex; align-items:center; gap: 4px; cursor: pointer; background: #fff; border: 1px solid var(--border); padding: 5px; border-radius: 4px; user-select: none; }
                 .days-grid label:hover { background: #f8f9fa; }
@@ -222,7 +247,6 @@ app.get('/', (req, res) => {
                         <div class="tab" onclick="switchTab('schedule')">⏰ Agendar Varredura</div>
                     </div>
 
-                    <!-- TAB: BAIXAR AGORA -->
                     <div id="tab-now" class="tab-content active">
                         <div class="form-group">
                             <label>📅 Datas (Clique para Selecionar Várias)</label>
@@ -231,7 +255,6 @@ app.get('/', (req, res) => {
                         <button type="button" id="btnNow" onclick="executeNow()">Iniciar Busca</button>
                     </div>
 
-                    <!-- TAB: AGENDAMENTO -->
                     <div id="tab-schedule" class="tab-content">
                         <div class="form-group">
                             <label>📅 Dias da Semana</label>
@@ -285,16 +308,14 @@ app.get('/', (req, res) => {
                 const socket = io();
                 const appStatus = document.getElementById('appStatus');
                 const loading = document.getElementById('loading');
-                const emptyMsg = document.getElementById('emptyMsg');
-                const emptySc = document.getElementById('emptySc');
                 const fileCount = document.getElementById('fileCount');
                 const scheduleList = document.getElementById('scheduleList');
                 const selectionControls = document.getElementById('selectionControls');
                 
                 let count = 0;
                 let numSchedules = 0;
+                let isClientReady = false;
 
-                // Iniiciar Calendário Múltiplo c/ Flatpickr
                 flatpickr("#searchDates", {
                     mode: "multiple",
                     dateFormat: "Y-m-d",
@@ -308,7 +329,6 @@ app.get('/', (req, res) => {
                 function switchTab(tab) {
                     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                     document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-                    
                     if(tab === 'now') {
                         document.querySelectorAll('.tab')[0].classList.add('active');
                         document.getElementById('tab-now').classList.add('active');
@@ -327,76 +347,46 @@ app.get('/', (req, res) => {
                 }
 
                 function toggleSelectAll(el) {
-                    const checkboxes = document.querySelectorAll('.pdf-checkbox');
-                    checkboxes.forEach(cb => cb.checked = el.checked);
+                    document.querySelectorAll('.pdf-checkbox').forEach(cb => cb.checked = el.checked);
                 }
 
                 async function deleteSelected() {
                     const selected = Array.from(document.querySelectorAll('.pdf-checkbox:checked')).map(cb => cb.value);
-                    if (selected.length === 0) return alert('Selecione ao menos um arquivo para excluir.');
-                    
+                    if (selected.length === 0) return alert('Selecione ao menos um arquivo.');
                     if (!confirm(\`Deseja realmente excluir \${selected.length} arquivo(s)?\`)) return;
-                    
-                    try {
-                        const res = await fetch('/delete-downloads', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ filenames: selected })
-                        });
-                        
-                        if (res.ok) {
-                            alert('Arquivos excluídos com sucesso!');
-                            location.reload(); // Recarregar para atualizar a lista
-                        } else {
-                            alert('Erro ao excluir arquivos.');
-                        }
-                    } catch (err) {
-                        alert('Erro na comunicação com o servidor.');
-                    }
+                    await fetch('/delete-downloads', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filenames: selected })
+                    });
+                    location.reload();
                 }
 
                 async function executeNow() {
+                    if (!isClientReady) return alert('O WhatsApp ainda está conectando. Por favor, aguarde o status "Conectado".');
                     const group = document.getElementById('groupName').value;
                     const datesStr = document.getElementById('searchDates').value;
-                    
-                    if(!group) return alert('Por favor, informe o nome do grupo.');
-                    if(!datesStr) return alert('Selecione ao menos uma data.');
+                    if(!group || !datesStr) return alert('Preencha o grupo e selecione as datas.');
                     
                     localStorage.setItem('extrator_group', group);
-                    const dates = datesStr.split(', ');
-                    
-                    document.getElementById('btnNow').disabled = true;
                     loading.style.display = 'block';
-                    document.getElementById('loadingText').innerText = 'Comunicando com WhatsApp...';
+                    document.getElementById('loadingText').innerText = 'Iniciando busca no WhatsApp...';
                     
                     await fetch('/fetch-pdfs', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ groupName: group, dates: dates })
+                        body: JSON.stringify({ groupName: group, dates: datesStr.split(', ') })
                     });
                 }
 
                 async function executeSchedule() {
                     const group = document.getElementById('groupName').value;
                     const time = document.getElementById('scTime').value;
-                    let days = [];
-                    
-                    if(document.getElementById('scAll').checked) {
-                        days = ['*'];
-                    } else {
-                        const checkedDays = document.querySelectorAll('.sc-day:checked');
-                        days = Array.from(checkedDays).map(cb => cb.value);
-                    }
-                    
-                    if(!group) return alert('Por favor, informe o nome do grupo.');
-                    if(days.length === 0) return alert('Selecione ao menos um dia da semana ou a opção "Todos".');
-                    if(!time) return alert('Preencha o horário.');
+                    let days = document.getElementById('scAll').checked ? ['*'] : Array.from(document.querySelectorAll('.sc-day:checked')).map(cb => cb.value);
+                    if(!group || days.length === 0 || !time) return alert('Preencha os dados do agendamento.');
                     
                     localStorage.setItem('extrator_group', group);
-                    document.getElementById('btnSchedule').disabled = true;
                     loading.style.display = 'block';
-                    document.getElementById('loadingText').innerText = 'Criando rotina...';
-                    
                     await fetch('/schedule', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
@@ -404,26 +394,33 @@ app.get('/', (req, res) => {
                     });
                 }
 
-                function appendScheduleDOM(data) {
-                    if(document.getElementById('emptySc')) document.getElementById('emptySc').style.display = 'none';
-                    numSchedules++;
+                socket.on('status', (data) => {
+                    appStatus.innerText = data.message;
+                    appStatus.className = 'status-badge ' + data.type;
+                    isClientReady = (data.type === 'success');
+                });
 
+                socket.on('pdf_downloaded', (data) => {
+                    if(document.getElementById('emptyMsg')) document.getElementById('emptyMsg').remove();
+                    selectionControls.style.display = 'flex';
+                    count++;
+                    fileCount.innerText = count + " Arquivos";
                     const item = document.createElement('div');
-                    item.className = 'schedule-item';
-                    item.id = 'sc-' + data.id;
-                    item.innerHTML = \`<span>\${data.group}</span><br>⏳ \${data.desc}
-                    <button class="btn-danger" onclick="deleteSchedule('\${data.id}')">Excluir</button>\`;
-                    scheduleList.appendChild(item);
-                }
+                    item.className = 'pdf-item';
+                    item.innerHTML = \`<input type="checkbox" class="pdf-checkbox" value="\${data.name}"><div class="pdf-icon">PDF</div><div class="pdf-info"><div class="pdf-name">\${data.name}</div><div class="pdf-meta">Tamanho: \${data.size} | Grupo: \${data.group}</div></div>\`;
+                    document.getElementById('pdfList').prepend(item);
+                });
 
-                async function loadSchedules() {
-                    const res = await fetch('/schedules');
-                    const list = await res.json();
-                    if(list.length > 0) {
-                        list.forEach(s => appendScheduleDOM(s));
-                    }
-                }
-                
+                socket.on('search_end', (data) => {
+                    loading.style.display = 'none';
+                    alert(data.message);
+                });
+
+                socket.on('search_start', (data) => {
+                    loading.style.display = 'block';
+                    document.getElementById('loadingText').innerText = data.message;
+                });
+
                 async function loadDownloads() {
                     const res = await fetch('/downloads');
                     const files = await res.json();
@@ -433,82 +430,15 @@ app.get('/', (req, res) => {
                         count = files.length;
                         fileCount.innerText = count + " Arquivos";
                         const list = document.getElementById('pdfList');
-                        
                         files.forEach(f => {
                             const item = document.createElement('div');
                             item.className = 'pdf-item';
-                            item.innerHTML = \`
-                                <input type="checkbox" class="pdf-checkbox" value="\${f.name}">
-                                <div class="pdf-icon">PDF</div>
-                                <div class="pdf-info">
-                                    <div class="pdf-name">\${f.name}</div>
-                                    <div class="pdf-meta">Tamanho: \${f.size} | Arquivo Local | \${f.dateStr}</div>
-                                </div>
-                            \`;
+                            item.innerHTML = \`<input type="checkbox" class="pdf-checkbox" value="\${f.name}"><div class="pdf-icon">PDF</div><div class="pdf-info"><div class="pdf-name">\${f.name}</div><div class="pdf-meta">Tamanho: \${f.size} | Local</div></div>\`;
                             list.appendChild(item);
                         });
                     }
                 }
-
-                async function deleteSchedule(id) {
-                    if(!confirm('Deseja cancelar e remover este agendamento?')) return;
-                    await fetch('/schedule/' + id, { method: 'DELETE' });
-                }
-
-                // Call loads on boot
-                loadSchedules();
                 loadDownloads();
-
-                socket.on('status', (data) => {
-                    appStatus.innerText = data.message;
-                    appStatus.className = 'status-badge ' + data.type;
-                });
-
-                socket.on('search_start', (data) => {
-                    loading.style.display = 'block';
-                    document.getElementById('loadingText').innerText = data.message;
-                });
-
-                socket.on('pdf_downloaded', (data) => {
-                    if(document.getElementById('emptyMsg')) document.getElementById('emptyMsg').remove();
-                    selectionControls.style.display = 'flex';
-                    count++;
-                    fileCount.innerText = count + " Arquivos";
-                    
-                    const item = document.createElement('div');
-                    item.className = 'pdf-item';
-                    item.innerHTML = \`
-                        <input type="checkbox" class="pdf-checkbox" value="\${data.name}">
-                        <div class="pdf-icon">PDF</div>
-                        <div class="pdf-info">
-                            <div class="pdf-name">\${data.name}</div>
-                            <div class="pdf-meta">Tamanho: \${data.size} | Grupo: \${data.group} | \${new Date().toLocaleTimeString()}</div>
-                        </div>
-                    \`;
-                    document.getElementById('pdfList').prepend(item);
-                });
-
-                socket.on('search_end', (data) => {
-                    loading.style.display = 'none';
-                    document.getElementById('btnNow').disabled = false;
-                    alert(data.message);
-                });
-
-                socket.on('schedule_created', (data) => {
-                    loading.style.display = 'none';
-                    document.getElementById('btnSchedule').disabled = false;
-                    appendScheduleDOM(data);
-                    alert("Agendamento Registrado com sucesso!");
-                });
-
-                socket.on('schedule_deleted', (data) => {
-                    const el = document.getElementById('sc-' + data.id);
-                    if(el) el.remove();
-                    numSchedules--;
-                    if(numSchedules === 0 && document.getElementById('emptySc')) {
-                        document.getElementById('emptySc').style.display = 'block';
-                    }
-                });
             </script>
         </body>
         </html>
@@ -516,114 +446,40 @@ app.get('/', (req, res) => {
 });
 
 app.post('/fetch-pdfs', async (req, res) => {
-    const { groupName, dates } = req.body;
-    const result = await executeDownload(groupName, dates);
-    if(result.success) {
-        io.emit('search_end', { message: result.message });
-        res.json({ success: true });
-    } else {
-        io.emit('search_end', { message: 'Erro: ' + result.message });
-        res.status(500).json({ error: result.message });
-    }
+    const result = await executeDownload(req.body.groupName, req.body.dates);
+    io.emit('search_end', { message: result.message });
+    res.json(result);
 });
 
 app.post('/schedule', (req, res) => {
     const { groupName, days, time } = req.body;
-    if (!groupName || !days || !time) return res.status(400).json({ error: 'Faltam dados' });
-
-    const [hour, min] = time.split(':');
-    let cronTime = '';
-    let diasStr = '';
-
-    if (days.includes('*')) {
-        cronTime = `${parseInt(min)} ${parseInt(hour)} * * *`;
-        diasStr = 'Todos os dias';
-    } else {
-        cronTime = `${parseInt(min)} ${parseInt(hour)} * * ${days.join(',')}`;
-        const mapDias = {'0':'Dom', '1':'Seg', '2':'Ter', '3':'Qua', '4':'Qui', '5':'Sex', '6':'Sáb'};
-        diasStr = days.map(d => mapDias[d]).join(', ');
-    }
-
-    const desc = `Dias: ${diasStr} às ${time}`;
     const id = Date.now().toString();
-
-    const job = cron.schedule(cronTime, async () => {
-        const today = new Date().toISOString().split('T')[0];
-        console.log(`[Cron ${id}] Executando rotina para ${groupName}`);
-        io.emit('search_start', { message: `Rodando agendamento (Automático): ${groupName}` });
-        await executeDownload(groupName, [today]);
-    });
-
-    activeSchedules[id] = { job, groupName, desc, cronTime };
+    const [hour, min] = time.split(':');
+    const cronTime = days.includes('*') ? `${min} ${hour} * * *` : `${min} ${hour} * * ${days.join(',')}`;
+    const job = cron.schedule(cronTime, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]]));
+    activeSchedules[id] = { job, groupName, desc: `Dias: ${days} às ${time}`, cronTime };
     saveSchedules();
-    
-    io.emit('schedule_created', { id, group: groupName, desc });
-    res.json({ success: true, id });
-});
-
-app.get('/schedules', (req, res) => {
-    const list = Object.keys(activeSchedules).map(id => ({
-        id,
-        group: activeSchedules[id].groupName,
-        desc: activeSchedules[id].desc
-    }));
-    res.json(list);
+    io.emit('schedule_created', { id, group: groupName });
+    res.json({ success: true });
 });
 
 app.get('/downloads', (req, res) => {
-    try {
-        const files = fs.readdirSync(DOWNLOAD_DIR);
-        const fileData = files.filter(f => f.endsWith('.pdf')).map(file => {
-            const stats = fs.statSync(path.join(DOWNLOAD_DIR, file));
-            return {
-                name: file,
-                size: (stats.size / 1024 / 1024).toFixed(2) + ' MB',
-                time: stats.mtime.getTime(),
-                dateStr: stats.mtime.toLocaleTimeString()
-            };
-        });
-        fileData.sort((a, b) => b.time - a.time);
-        res.json(fileData);
-    } catch (err) {
-        res.status(500).json({error: 'Failed'});
-    }
+    const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.pdf')).map(file => {
+        const stats = fs.statSync(path.join(DOWNLOAD_DIR, file));
+        return { name: file, size: (stats.size / 1024 / 1024).toFixed(2) + ' MB' };
+    });
+    res.json(files);
 });
 
 app.post('/delete-downloads', (req, res) => {
-    const { filenames } = req.body;
-    if (!filenames || !Array.isArray(filenames)) return res.status(400).json({ error: 'Lista de arquivos inválida' });
-
-    let deleted = 0;
-    let errors = 0;
-
-    filenames.forEach(file => {
-        const fullPath = path.join(DOWNLOAD_DIR, file);
-        if (fs.existsSync(fullPath)) {
-            try {
-                fs.unlinkSync(fullPath);
-                deleted++;
-            } catch (err) {
-                errors++;
-            }
-        }
+    req.body.filenames.forEach(f => {
+        const p = path.join(DOWNLOAD_DIR, f);
+        if(fs.existsSync(p)) fs.unlinkSync(p);
     });
-
-    res.json({ success: true, deleted, errors });
-});
-
-app.delete('/schedule/:id', (req, res) => {
-    const id = req.params.id;
-    if (activeSchedules[id]) {
-        activeSchedules[id].job.stop();
-        delete activeSchedules[id];
-        saveSchedules();
-        io.emit('schedule_deleted', { id });
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: 'Agendamento nao encontrado' });
-    }
+    res.json({ success: true });
 });
 
 loadSchedules();
 server.listen(port, () => console.log(`Dashboard: http://localhost:${port}`));
+cleanSessionData();
 client.initialize();
