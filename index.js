@@ -1,5 +1,5 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -7,154 +7,126 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cron = require('node-cron');
 
-function cleanSessionData() {
-    const sessionDir = path.join(__dirname, '.wwebjs_auth', 'session', 'Default');
-    const dirsToDelete = [
-        'Cache',
-        'Code Cache',
-        'Service Worker/CacheStorage',
-        'Service Worker/ScriptCache',
-        'GPUCache'
-    ];
-    
-    if (fs.existsSync(sessionDir)) {
-        console.log('[Otimização] Limpando pastas de cache pesadas antes de iniciar...');
-        dirsToDelete.forEach(dir => {
-            const p = path.join(sessionDir, dir);
-            if (fs.existsSync(p)) {
-                try {
-                    fs.rmSync(p, { recursive: true, force: true });
-                } catch (e) {}
-            }
-        });
-    }
-}
-
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+const port = 3002;
 
+// Envia o status imediato quando alguém abre a página
 io.on('connection', (socket) => {
     if (isReady) {
-        socket.emit('status', { message: 'Pronto p/ Uso', type: 'success' });
+        socket.emit('status', { message: 'Conectado!', type: 'success' });
     } else {
-        socket.emit('status', { message: 'Conectando...', type: 'warning' });
+        socket.emit('status', { message: 'Aguardando conexão...', type: 'warning' });
     }
 });
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-const port = 3002;
 
 const DOWNLOAD_DIR = path.join(__dirname, 'PDFS_Baixados');
+const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: { 
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            '--disable-extensions'
-        ]
-    }
-});
-
 let isReady = false;
-let activeSchedules = {}; // Agora é um objeto para gerenciar IDs
-const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
+let activeSchedules = {};
 
 function saveSchedules() {
-    const dataToSave = {};
-    for (const id in activeSchedules) {
-        dataToSave[id] = {
-            groupName: activeSchedules[id].groupName,
-            desc: activeSchedules[id].desc,
-            cronTime: activeSchedules[id].cronTime
-        };
-    }
-    fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(dataToSave));
+    const data = Object.keys(activeSchedules).map(id => ({
+        id,
+        groupName: activeSchedules[id].groupName,
+        days: activeSchedules[id].days,
+        time: activeSchedules[id].time,
+        desc: activeSchedules[id].desc,
+        cronTime: activeSchedules[id].cronTime
+    }));
+    fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(data, null, 2));
 }
 
 function loadSchedules() {
     if (fs.existsSync(SCHEDULES_FILE)) {
         try {
             const data = JSON.parse(fs.readFileSync(SCHEDULES_FILE));
-            for (const id in data) {
-                const { groupName, desc, cronTime } = data[id];
-                const job = cron.schedule(cronTime, async () => {
-                    const today = new Date().toISOString().split('T')[0];
-                    console.log(`[Cron ${id}] Executando rotina para ${groupName}`);
-                    io.emit('search_start', { message: `Rodando agendamento (Automático): ${groupName}` });
-                    await executeDownload(groupName, [today]);
+            if (Array.isArray(data)) {
+                data.forEach(s => {
+                    const job = cron.schedule(s.cronTime, () => executeDownload(s.groupName, [new Date().toISOString().split('T')[0]]));
+                    activeSchedules[s.id] = { job, ...s };
                 });
-                activeSchedules[id] = { job, groupName, desc, cronTime };
             }
         } catch (e) {
-            console.error('Erro carregando agendamentos salvos', e);
+            console.error('Erro ao carregar agendamentos:', e.message);
+            fs.writeFileSync(SCHEDULES_FILE, '[]');
         }
+    } else {
+        fs.writeFileSync(SCHEDULES_FILE, '[]');
     }
 }
 
-client.on('qr', async (qr) => {
-    const filePath = path.join(__dirname, 'qr.png');
-    await QRCode.toFile(filePath, qr);
-    console.log('--- NOVO QR CODE GERADO. ESCANEIE POR FAVOR ---');
-    io.emit('status', { message: 'Aguardando QR Code...', type: 'warning' });
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+});
+
+client.on('qr', (qr) => {
+    console.log('QR Code recebido no terminal.');
+    qrcode.generate(qr, { small: true });
+    io.emit('status', { message: 'Escaneie o QR Code no terminal', type: 'warning' });
 });
 
 client.on('ready', () => {
+    console.log('WhatsApp Conectado!');
     isReady = true;
-    const filePath = path.join(__dirname, 'qr.png');
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    console.log('--- WHATSAPP PRONTO PARA USO ---');
     io.emit('status', { message: 'WhatsApp Conectado!', type: 'success' });
 });
 
-const executeDownload = async (groupName, targetDates) => {
-    if (!isReady) return { success: false, message: 'O WhatsApp não está conectado. Por favor, aguarde ou escaneie o QR Code.' };
+let shouldStopSearch = false;
 
+const executeDownload = async (groupName, targetDates) => {
+    if (!isReady) return { success: false, message: 'WhatsApp não conectado.' };
+    shouldStopSearch = false;
     try {
         const chats = await client.getChats();
         const group = chats.find(c => c.isGroup && c.name.toLowerCase().includes(groupName.toLowerCase()));
-
         if (!group) return { success: false, message: 'Grupo não encontrado.' };
 
         const datesArray = Array.isArray(targetDates) ? targetDates : [targetDates];
-        io.emit('search_start', { message: `Pesquisando em ${group.name} | Datas: ${datesArray.join(', ')}` });
+        io.emit('search_start', { message: `Varrendo "${group.name}"...` });
 
         const messages = await group.fetchMessages({ limit: 1000 });
+        const total = messages.length;
         let downloadedCount = 0;
+        let processed = 0;
 
         for (const msg of messages) {
+            if (shouldStopSearch) break;
+            processed++;
+            if (processed % 10 === 0 || processed === total) {
+                io.emit('search_progress', { 
+                    percent: Math.round((processed / total) * 100),
+                    current: processed,
+                    total: total
+                });
+            }
+
             const msgDate = new Date(msg.timestamp * 1000).toISOString().split('T')[0];
             if (datesArray.includes(msgDate) && msg.hasMedia) {
                 const media = await msg.downloadMedia();
                 if (media && media.mimetype === 'application/pdf') {
-                    const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `pdf.pdf`;
+                    const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `documento.pdf`;
                     const filename = `${msg.timestamp}_${baseName}`;
-                    const fullPath = path.join(DOWNLOAD_DIR, filename);
-                    fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
-                    
+                    fs.writeFileSync(path.join(DOWNLOAD_DIR, filename), media.data, { encoding: 'base64' });
                     io.emit('pdf_downloaded', { 
                         name: filename, 
-                        size: (media.data.length / 1024 / 1024).toFixed(2) + ' MB',
-                        group: group.name
+                        size: (media.data.length * 0.75 / 1024 / 1024).toFixed(2) + ' MB'
                     });
                     downloadedCount++;
                 }
             }
         }
-        return { success: true, count: downloadedCount, message: `Busca finalizada! ${downloadedCount} arquivos baixados.` };
-    } catch (err) {
-        return { success: false, message: err.message };
-    }
+        return { success: true, count: downloadedCount, message: `Busca finalizada: ${downloadedCount} PDFs obtidos.` };
+    } catch (err) { return { success: false, message: err.message }; }
 };
 
 app.get('/', (req, res) => {
@@ -169,317 +141,295 @@ app.get('/', (req, res) => {
             <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
             <script src="https://npmcdn.com/flatpickr/dist/l10n/pt.js"></script>
             <style>
-                :root { --primary: #25d366; --dark: #075e54; --bg: #f8f9fa; --white: #ffffff; --border: #e0e0e0; }
-                body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); margin: 0; display: flex; height: 100vh; color: #333; }
-                
-                .sidebar { width: 340px; background: var(--white); padding: 25px; border-right: 1px solid var(--border); box-shadow: 2px 0 10px rgba(0,0,0,0.02); display: flex; flex-direction: column; overflow-y: auto; }
-                .main { flex: 1; padding: 30px; overflow-y: auto; display: flex; flex-direction: column; }
-                h2 { color: var(--dark); font-size: 1.1rem; margin-top: 0; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
-                
-                .form-group { margin-bottom: 15px; }
-                label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 5px; color: #555; }
-                input, select { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; box-sizing: border-box; background: #fafafa; }
-                input:focus, select:focus { outline: none; border-color: var(--primary); background: #fff; }
-                
-                button { width: 100%; padding: 12px; margin-top: 5px; background: var(--primary); color: white; border: none; border-radius: 6px; font-size: 0.9rem; cursor: pointer; font-weight: 600; transition: 0.2s; }
-                button:hover { background: #128c7e; }
-                button:disabled { background: #ebd9d9ff; cursor: not-allowed; }
-                .btn-secondary { background: #6c757d; }
-                .btn-secondary:hover { background: #5a6268; }
-                .btn-danger { background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; }
+                :root { --primary: #25d366; --dark: #075e54; --bg: #f5f7f9; --white: #ffffff; --border: #e0e0e0; }
+                body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; height: 100vh; overflow: hidden; color: #333; }
+                .sidebar { width: 350px; background: var(--white); border-right: 1px solid var(--border); padding: 25px; display: flex; flex-direction: column; overflow-y: auto; }
+                .main { flex: 1; padding: 30px; display: flex; flex-direction: column; overflow: hidden; }
+                .card { background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.02); margin-bottom: 25px; }
+                h2 { color: var(--dark); font-size: 1.1rem; margin: 0 0 20px 0; display: flex; align-items: center; gap: 10px; font-weight: 700; }
+                label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: #555; }
+                input { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; box-sizing: border-box; margin-bottom: 15px; font-size: 0.9rem; }
+                button { width: 100%; padding: 13px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 0.95rem; }
+                button:hover { background: #128c7e; transform: translateY(-1px); }
+                .btn-danger { background: #ef4444; }
                 .btn-danger:hover { background: #dc2626; }
-
-                .tabs { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 20px; gap: 10px;}
-                .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-weight: 600; color: #888; font-size: 0.85rem; transition: 0.2s; border-radius: 6px 6px 0 0; background: #e9ecef;}
-                .tab.active { color: #fff; background: var(--primary); border-bottom-color: var(--primary); }
+                .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+                .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; background: #eaedf0; border-radius: 8px; font-size: 0.85rem; font-weight: 600; transition: 0.2s; }
+                .tab.active { background: var(--primary); color: white; }
                 .tab-content { display: none; }
-                .tab-content.active { display: block; animation: fadeIn 0.3s; }
-
-                .days-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
-                .days-grid label { font-size: 0.8rem; font-weight: 500; display:flex; align-items:center; gap: 4px; cursor: pointer; background: #fff; border: 1px solid var(--border); padding: 5px; border-radius: 4px; user-select: none; }
-                .days-grid label:hover { background: #f8f9fa; }
-
-                .status-badge { padding: 6px 14px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; margin-bottom: 15px; display: inline-block; text-align: center; width: auto; align-self: flex-start;}
+                .tab-content.active { display: block; }
+                .days-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+                .days-grid label { font-size: 0.75rem; display: flex; align-items: center; gap: 5px; background: #fff; border: 1px solid #ddd; padding: 6px; border-radius: 6px; cursor: pointer; user-select: none; font-weight: normal; }
+                .status-badge { padding: 8px 16px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; margin-bottom: 25px; display: inline-block; }
                 .success { background: #dcf8c6; color: #075e54; }
                 .warning { background: #fff3cd; color: #856404; }
-                
-                #loading { display: none; text-align: center; margin-top: 20px; font-size: 0.8rem; color: #666; background: #e3f2fd; padding: 10px; border-radius: 6px; }
-                .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #ccc; border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; vertical-align: middle; margin-right: 8px; }
-                @keyframes spin { to { transform: rotate(360deg); } }
-                @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-
-                .card { background: var(--white); padding: 20px; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); position: relative; }
-                .pdf-item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #f0f0f0; animation: fadeSlide 0.4s ease-out; }
-                .pdf-item:last-child { border-bottom: none; }
-                .pdf-checkbox { width: 18px; height: 18px; cursor: pointer; }
-                .pdf-icon { width: 32px; height: 32px; background: #fee2e2; color: #ef4444; display: flex; align-items: center; justify-content: center; border-radius: 6px; font-weight: 700; font-size: 0.7rem; }
-                .pdf-info { flex: 1; min-width: 0; }
-                .pdf-name { font-weight: 600; color: #2d3748; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-                .pdf-meta { font-size: 0.7rem; color: #718096; margin-top: 3px; }
-                
-                .schedule-item { background: #f8f9fa; border: 1px dashed #ced4da; padding: 10px 45px 10px 10px; font-size: 0.75rem; border-radius: 6px; margin-bottom: 10px; position: relative; }
-                .schedule-item span { font-weight: bold; color: var(--dark); font-size: 0.8rem; }
-                .schedule-item .btn-danger { padding: 5px 8px; font-size: 0.75rem; width: auto; position: absolute; right: 5px; top: 5px; }
-
-                .main-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-                .selection-controls { display: flex; align-items: center; gap: 15px; background: #edf2f7; padding: 8px 15px; border-radius: 8px; }
-                .selection-controls label { font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-                .btn-bulk-delete { padding: 6px 12px; font-size: 0.85rem; width: auto; margin-top: 0; }
-
-                @keyframes fadeSlide { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+                #loading { display: none; background: #e3f2fd; padding: 20px; border-radius: 10px; text-align: center; margin-top: 15px; }
+                .progress { height: 12px; background: #cfd8dc; border-radius: 6px; overflow: hidden; margin: 15px 0; }
+                #bar { height: 100%; width: 0%; background: var(--primary); transition: 0.4s ease; }
+                #pdfList { flex: 1; overflow-y: auto; background: white; border-radius: 12px; border: 1px solid var(--border); }
+                .pdf-item { display: flex; align-items: center; gap: 15px; padding: 15px; border-bottom: 1px solid #f0f0f0; transition: 0.2s; }
+                .pdf-item:hover { background: #f8fafb; }
+                .pdf-icon { width: 44px; height: 44px; background: #fee2e2; color: #ef4444; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-weight: 800; font-size: 0.8rem; min-width: 44px; }
+                .pdf-info { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 4px; }
+                .pdf-name { font-weight: 600; font-size: 0.95rem; color: #1a202c; }
+                .pdf-meta { font-size: 0.8rem; color: #718096; }
+                .schedule-item { background: #fdfdfd; padding: 15px; border-radius: 10px; border: 1px dashed #cbd5e0; margin-bottom: 12px; position: relative; }
+                .schedule-item b { font-size: 0.9rem; color: #2d3748; }
+                .schedule-item span { font-size: 0.8rem; color: #718096; display: block; margin-top: 5px; }
+                .delete-sch { position: absolute; right: 10px; top: 15px; color: #e53e3e; cursor: pointer; border: none; background: none; font-size: 1.3rem; line-height: 1; }
+                .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+                .selection-grp { display: flex; align-items: center; gap: 15px; background: #edf2f7; padding: 10px 18px; border-radius: 10px; }
             </style>
         </head>
         <body>
             <div class="sidebar">
-                <div style="display:flex; justify-content: space-between; align-items:center;">
-                    <h2>Extrator Bot 🤖</h2>
-                    <div id="appStatus" class="status-badge warning">Conectando...</div>
-                </div>
-
-                <div class="card" style="padding: 15px; margin-bottom: 20px; border: none; box-shadow: none; background: #fff; border: 1px solid var(--border);">
-                    <div class="form-group">
-                        <label>📌 Nome do Grupo</label>
-                        <input type="text" id="groupName" placeholder="Ex: Financeiro S/A" required>
-                    </div>
-
+                <div id="appStatus" class="status-badge warning">Iniciando...</div>
+                <div class="card">
+                    <h2>Extração ⚙️</h2>
+                    <label>📌 Nome do Grupo</label>
+                    <input type="text" id="groupName" placeholder="Ex: Financeiro Vendas">
+                    
                     <div class="tabs">
-                        <div class="tab active" onclick="switchTab('now')">⚡ Baixar Agora</div>
-                        <div class="tab" onclick="switchTab('schedule')">⏰ Agendar Varredura</div>
+                        <div class="tab active" onclick="switchTab('now')">Baixar Agora</div>
+                        <div class="tab" onclick="switchTab('sch')">Agendar</div>
                     </div>
 
                     <div id="tab-now" class="tab-content active">
-                        <div class="form-group">
-                            <label>📅 Datas (Clique para Selecionar Várias)</label>
-                            <input type="text" id="searchDates" placeholder="Selecionar Datas" required>
-                        </div>
-                        <button type="button" id="btnNow" onclick="executeNow()">Iniciar Busca</button>
+                        <label>📅 Datas (Selecione uma ou mais)</label>
+                        <input type="text" id="targetDates" placeholder="Clique para escolher">
+                        <button onclick="executeNow()">Iniciar Varredura</button>
                     </div>
 
-                    <div id="tab-schedule" class="tab-content">
-                        <div class="form-group">
-                            <label>📅 Dias da Semana</label>
-                            <div class="days-grid">
-                                <label><input type="checkbox" id="scAll" value="*" onchange="toggleAllDays(this)"> Todos</label>
-                                <label><input type="checkbox" class="sc-day" value="1"> Seg</label>
-                                <label><input type="checkbox" class="sc-day" value="2"> Ter</label>
-                                <label><input type="checkbox" class="sc-day" value="3"> Qua</label>
-                                <label><input type="checkbox" class="sc-day" value="4"> Qui</label>
-                                <label><input type="checkbox" class="sc-day" value="5"> Sex</label>
-                                <label><input type="checkbox" class="sc-day" value="6"> Sáb</label>
-                                <label><input type="checkbox" class="sc-day" value="0"> Dom</label>
-                            </div>
+                    <div id="tab-sch" class="tab-content">
+                        <div class="days-grid">
+                            <label><input type="checkbox" id="scAll" onchange="toggleAllDays(this)">Tudo</label>
+                            <label><input type="checkbox" class="sc-day" value="1">Seg</label>
+                            <label><input type="checkbox" class="sc-day" value="2">Ter</label>
+                            <label><input type="checkbox" class="sc-day" value="3">Qua</label>
+                            <label><input type="checkbox" class="sc-day" value="4">Qui</label>
+                            <label><input type="checkbox" class="sc-day" value="5">Sex</label>
+                            <label><input type="checkbox" class="sc-day" value="6">Sáb</label>
+                            <label><input type="checkbox" class="sc-day" value="0">Dom</label>
                         </div>
-                        <div class="form-group">
-                            <label>⏰ Horário (HH:mm)</label>
-                            <input type="time" id="scTime" value="18:00" required>
-                        </div>
-                        <button type="button" class="btn-secondary" id="btnSchedule" onclick="executeSchedule()">+ Criar Agendamento</button>
+                        <label>⏰ Horário da Varredura</label>
+                        <input type="time" id="scTime" value="18:00">
+                        <button onclick="executeSchedule()">+ Criar Agendamento</button>
                     </div>
 
-                    <div id="loading"><span class="spinner"></span> <span id="loadingText">Processando...</span></div>
-                </div>
-
-                <div class="card" style="padding: 15px; flex: 1;">
-                    <h2 style="font-size: 0.9rem;">⏰ Agendamentos Ativos</h2>
-                    <div id="scheduleList">
-                        <p id="emptySc" style="font-size: 0.75rem; color: #999;">Nenhum agendamento ativo.</p>
+                    <div id="loading">
+                        <div id="loadingText" style="font-size: 0.9rem; font-weight: 700; color: #1976d2;">Preparando...</div>
+                        <div class="progress"><div id="bar"></div></div>
+                        <button class="btn-danger" style="padding: 10px; font-size: 0.85rem;" onclick="stopSearch()">⛔ PARAR BUSCA</button>
                     </div>
                 </div>
+
+                <h2>Agendamentos Ativos</h2>
+                <div id="scheduleList"></div>
             </div>
 
             <div class="main">
-                <div class="main-header">
-                    <h2>📥 PDFs Baixados Recentes <span id="fileCount" style="font-size: 0.75rem; background: #edf2f7; padding: 3px 8px; border-radius: 12px; margin-left: auto;">0 Arquivos</span></h2>
-                    
-                    <div class="selection-controls" id="selectionControls" style="display: none;">
-                        <label><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"> Selecionar Todos</label>
-                        <button class="btn-danger btn-bulk-delete" onclick="deleteSelected()">Excluir Selecionados</button>
+                <div class="controls">
+                    <h2>PDFs Encontrados <span id="fileCount" style="background:#e2e8f0; padding:4px 12px; border-radius:20px; font-size:0.9rem;">0</span></h2>
+                    <div class="selection-grp">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 600;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"> Selecionar Todos</label>
+                        <button onclick="deleteSelected()" class="btn-danger" style="width: auto; padding: 8px 18px; font-size: 0.85rem;">Excluir Seleção</button>
                     </div>
                 </div>
-
-                <div class="card" style="flex: 1; overflow-y: auto;">
-                    <div id="pdfList">
-                        <p id="emptyMsg" style="color: #a0aec0; text-align: center; padding: 50px; font-size: 0.9rem;">Nenhum arquivo baixado nesta sessão.</p>
-                    </div>
-                </div>
+                <div id="pdfList"></div>
             </div>
 
             <script>
                 const socket = io();
-                const appStatus = document.getElementById('appStatus');
-                const loading = document.getElementById('loading');
-                const fileCount = document.getElementById('fileCount');
-                const scheduleList = document.getElementById('scheduleList');
-                const selectionControls = document.getElementById('selectionControls');
-                
-                let count = 0;
-                let numSchedules = 0;
-                let isClientReady = false;
+                const pdfList = document.getElementById('pdfList');
+                const fileCountText = document.getElementById('fileCount');
+                const loadingArea = document.getElementById('loading');
+                const progressBar = document.getElementById('bar');
+                const statusLabel = document.getElementById('loadingText');
+                const schedulesArea = document.getElementById('scheduleList');
 
-                flatpickr("#searchDates", {
-                    mode: "multiple",
-                    dateFormat: "Y-m-d",
-                    locale: "pt",
-                    defaultDate: [new Date()]
-                });
+                flatpickr("#targetDates", { mode: "multiple", dateFormat: "Y-m-d", locale: "pt", defaultDate: [new Date()] });
 
-                const savedGroup = localStorage.getItem('extrator_group');
+                const savedGroup = localStorage.getItem('extrator_group_v2');
                 if (savedGroup) document.getElementById('groupName').value = savedGroup;
 
-                function switchTab(tab) {
-                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-                    if(tab === 'now') {
-                        document.querySelectorAll('.tab')[0].classList.add('active');
-                        document.getElementById('tab-now').classList.add('active');
-                    } else {
-                        document.querySelectorAll('.tab')[1].classList.add('active');
-                        document.getElementById('tab-schedule').classList.add('active');
+                function switchTab(t) {
+                    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+                    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+                    if(t === 'now') { 
+                        document.querySelectorAll('.tab')[0].classList.add('active'); 
+                        document.getElementById('tab-now').classList.add('active'); 
+                    } else { 
+                        document.querySelectorAll('.tab')[1].classList.add('active'); 
+                        document.getElementById('tab-sch').classList.add('active'); 
                     }
                 }
 
-                function toggleAllDays(el) {
-                    const checkboxes = document.querySelectorAll('.sc-day');
-                    checkboxes.forEach(cb => {
-                        cb.disabled = el.checked;
-                        if(el.checked) cb.checked = false;
-                    });
+                function toggleAllDays(el) { 
+                    document.querySelectorAll('.sc-day').forEach(cb => { cb.disabled = el.checked; if(el.checked) cb.checked = false; }); 
+                }
+                
+                function toggleSelectAll(el) { 
+                    document.querySelectorAll('.pdf-cb').forEach(cb => cb.checked = el.checked); 
                 }
 
-                function toggleSelectAll(el) {
-                    document.querySelectorAll('.pdf-checkbox').forEach(cb => cb.checked = el.checked);
-                }
-
-                async function deleteSelected() {
-                    const selected = Array.from(document.querySelectorAll('.pdf-checkbox:checked')).map(cb => cb.value);
-                    if (selected.length === 0) return alert('Selecione ao menos um arquivo.');
-                    if (!confirm(\`Deseja realmente excluir \${selected.length} arquivo(s)?\`)) return;
-                    await fetch('/delete-downloads', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ filenames: selected })
-                    });
-                    location.reload();
+                async function stopSearch() { 
+                    fetch('/stop-search', { method: 'POST' }); 
+                    loadingArea.style.display = 'none'; 
                 }
 
                 async function executeNow() {
-                    if (!isClientReady) return alert('O WhatsApp ainda está conectando. Por favor, aguarde o status "Conectado".');
-                    const group = document.getElementById('groupName').value;
-                    const datesStr = document.getElementById('searchDates').value;
-                    if(!group || !datesStr) return alert('Preencha o grupo e selecione as datas.');
-                    
-                    localStorage.setItem('extrator_group', group);
-                    loading.style.display = 'block';
-                    document.getElementById('loadingText').innerText = 'Iniciando busca no WhatsApp...';
-                    
-                    await fetch('/fetch-pdfs', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ groupName: group, dates: datesStr.split(', ') })
-                    });
+                    const g = document.getElementById('groupName').value;
+                    const d = document.getElementById('targetDates').value;
+                    if(!g || !d) return alert('Por favor, preencha o grupo e as datas.');
+                    localStorage.setItem('extrator_group_v2', g);
+                    loadingArea.style.display = 'block';
+                    progressBar.style.width = '0%';
+                    statusLabel.innerText = 'Iniciando busca no WhatsApp...';
+                    fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, dates: d.split(', ') }) });
                 }
 
                 async function executeSchedule() {
-                    const group = document.getElementById('groupName').value;
-                    const time = document.getElementById('scTime').value;
+                    const g = document.getElementById('groupName').value;
+                    const h = document.getElementById('scTime').value;
                     let days = document.getElementById('scAll').checked ? ['*'] : Array.from(document.querySelectorAll('.sc-day:checked')).map(cb => cb.value);
-                    if(!group || days.length === 0 || !time) return alert('Preencha os dados do agendamento.');
-                    
-                    localStorage.setItem('extrator_group', group);
-                    loading.style.display = 'block';
-                    await fetch('/schedule', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ groupName: group, days, time })
-                    });
+                    if(!g || days.length === 0 || !h) return alert('Preecha todos os dados do agendamento.');
+                    localStorage.setItem('extrator_group_v2', g);
+                    await fetch('/schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, days, time: h }) });
+                    loadSchedulesList();
                 }
 
-                socket.on('status', (data) => {
-                    appStatus.innerText = data.message;
-                    appStatus.className = 'status-badge ' + data.type;
-                    isClientReady = (data.type === 'success');
-                });
-
-                socket.on('pdf_downloaded', (data) => {
+                function addPDF(f, isPrepend = true) {
                     if(document.getElementById('emptyMsg')) document.getElementById('emptyMsg').remove();
-                    selectionControls.style.display = 'flex';
-                    count++;
-                    fileCount.innerText = count + " Arquivos";
-                    const item = document.createElement('div');
-                    item.className = 'pdf-item';
-                    item.innerHTML = \`<input type="checkbox" class="pdf-checkbox" value="\${data.name}"><div class="pdf-icon">PDF</div><div class="pdf-info"><div class="pdf-name">\${data.name}</div><div class="pdf-meta">Tamanho: \${data.size} | Grupo: \${data.group}</div></div>\`;
-                    document.getElementById('pdfList').prepend(item);
+                    const row = document.createElement('div');
+                    row.className = 'pdf-item';
+                    
+                    // Estrutura interna concatenada para evitar problemas de escape de backticks
+                    row.innerHTML = '<input type="checkbox" class="pdf-cb" style="width:20px; height:20px; min-width:20px;">' +
+                                     '<div class="pdf-icon" style="margin: 0 10px;">PDF</div>' +
+                                     '<div class="pdf-info">' +
+                                        '<div class="pdf-name" style="color:#333; font-weight:bold;"></div>' +
+                                        '<div class="pdf-meta" style="color:#666; font-size:0.8rem;"></div>' +
+                                     '</div>';
+                    
+                    row.querySelector('.pdf-cb').value = f.name;
+                    row.querySelector('.pdf-name').innerText = f.name;
+                    row.querySelector('.pdf-meta').innerText = 'Tamanho: ' + f.size;
+                    
+                    if(isPrepend) pdfList.prepend(row); else pdfList.appendChild(row);
+                    updateCount();
+                }
+
+                function updateCount() { 
+                    fileCountText.innerText = document.querySelectorAll('.pdf-item').length; 
+                }
+
+                socket.on('pdf_downloaded', f => addPDF(f));
+                
+                socket.on('search_progress', p => { 
+                    progressBar.style.width = p.percent + '%';
+                    statusLabel.innerText = 'Lendo mensagens: ' + p.current + ' de ' + p.total;
                 });
 
-                socket.on('search_end', (data) => {
-                    loading.style.display = 'none';
-                    alert(data.message);
+                socket.on('search_start', m => { 
+                    loadingArea.style.display = 'block'; 
+                    statusLabel.innerText = m.message; 
                 });
 
-                socket.on('search_start', (data) => {
-                    loading.style.display = 'block';
-                    document.getElementById('loadingText').innerText = data.message;
+                socket.on('search_end', m => { 
+                    loadingArea.style.display = 'none'; 
+                    alert(m.message); 
+                });
+
+                socket.on('status', s => { 
+                    const el = document.getElementById('appStatus'); 
+                    el.innerText = s.message; 
+                    el.className = 'status-badge ' + (s.type === 'success' ? 'success' : 'warning'); 
                 });
 
                 async function loadDownloads() {
-                    const res = await fetch('/downloads');
-                    const files = await res.json();
-                    if(files.length > 0) {
-                        if(document.getElementById('emptyMsg')) document.getElementById('emptyMsg').remove();
-                        selectionControls.style.display = 'flex';
-                        count = files.length;
-                        fileCount.innerText = count + " Arquivos";
-                        const list = document.getElementById('pdfList');
-                        files.forEach(f => {
-                            const item = document.createElement('div');
-                            item.className = 'pdf-item';
-                            item.innerHTML = \`<input type="checkbox" class="pdf-checkbox" value="\${f.name}"><div class="pdf-icon">PDF</div><div class="pdf-info"><div class="pdf-name">\${f.name}</div><div class="pdf-meta">Tamanho: \${f.size} | Local</div></div>\`;
-                            list.appendChild(item);
-                        });
-                    }
+                    const r = await fetch('/downloads');
+                    const files = await r.json();
+                    pdfList.innerHTML = files.length ? '' : '<p id="emptyMsg" style="text-align:center; color:#adb5bd; padding:60px;">Nenhum PDF encontrado ainda.</p>';
+                    files.forEach(x => addPDF(x, false));
                 }
+
+                async function loadSchedulesList() {
+                    const r = await fetch('/schedules');
+                    const ss = await r.json();
+                    schedulesArea.innerHTML = ss.length ? '' : '<p style="font-size:0.85rem; color:#999; text-align:center;">Sem varreduras agendadas.</p>';
+                    ss.forEach(s => {
+                        const item = document.createElement('div');
+                        item.className = 'schedule-item';
+                        item.innerHTML = '<b>' + s.groupName + '</b><span>' + s.desc + '</span><button class="delete-sch" onclick="deleteSchedule(\\'' + s.id + '\\')">×</button>';
+                        schedulesArea.appendChild(item);
+                    });
+                }
+
+                async function deleteSchedule(id) { 
+                    if(!confirm('Deseja excluir este agendamento?')) return; 
+                    await fetch('/schedule/' + id, { method: 'DELETE' }); 
+                    loadSchedulesList(); 
+                }
+
+                async function deleteSelected() {
+                    const selected = Array.from(document.querySelectorAll('.pdf-cb:checked')).map(x => x.value);
+                    if(!selected.length) return alert('Selecione arquivos primeiro.');
+                    if(!confirm('Excluir ' + selected.length + ' arquivos?')) return;
+                    await fetch('/delete-downloads', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ filenames: selected }) });
+                    loadDownloads();
+                }
+
                 loadDownloads();
+                loadSchedulesList();
             </script>
         </body>
         </html>
     `);
 });
 
-app.post('/fetch-pdfs', async (req, res) => {
-    const result = await executeDownload(req.body.groupName, req.body.dates);
-    io.emit('search_end', { message: result.message });
-    res.json(result);
+app.get('/downloads', (req, res) => {
+    try {
+        const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.pdf')).map(f => {
+            const s = fs.statSync(path.join(DOWNLOAD_DIR, f));
+            return { name: f, size: (s.size/1024/1024).toFixed(2) + ' MB' };
+        });
+        res.json(files);
+    } catch(e) { res.json([]); }
+});
+
+app.get('/schedules', (req, res) => {
+    res.json(Object.keys(activeSchedules).map(id => ({ id, groupName: activeSchedules[id].groupName, desc: activeSchedules[id].desc })));
 });
 
 app.post('/schedule', (req, res) => {
     const { groupName, days, time } = req.body;
     const id = Date.now().toString();
-    const [hour, min] = time.split(':');
-    const cronTime = days.includes('*') ? `${min} ${hour} * * *` : `${min} ${hour} * * ${days.join(',')}`;
-    const job = cron.schedule(cronTime, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]]));
-    activeSchedules[id] = { job, groupName, desc: `Dias: ${days} às ${time}`, cronTime };
+    const [h, m] = time.split(':');
+    const ct = days.includes('*') ? `${m} ${h} * * *` : `${m} ${h} * * ${days.join(',')}`;
+    const job = cron.schedule(ct, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]]));
+    activeSchedules[id] = { job, groupName, days, time, desc: `Dias [${days}] às ${time}`, cronTime: ct };
     saveSchedules();
-    io.emit('schedule_created', { id, group: groupName });
     res.json({ success: true });
 });
 
-app.get('/downloads', (req, res) => {
-    const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.pdf')).map(file => {
-        const stats = fs.statSync(path.join(DOWNLOAD_DIR, file));
-        return { name: file, size: (stats.size / 1024 / 1024).toFixed(2) + ' MB' };
-    });
-    res.json(files);
+app.delete('/schedule/:id', (req, res) => {
+    const id = req.params.id;
+    if (activeSchedules[id]) { activeSchedules[id].job.stop(); delete activeSchedules[id]; saveSchedules(); }
+    res.json({ success: true });
 });
 
+app.post('/fetch-pdfs', async (req, res) => {
+    const r = await executeDownload(req.body.groupName, req.body.dates);
+    io.emit('search_end', { message: r.message });
+    res.json(r);
+});
+
+app.post('/stop-search', (req, res) => { shouldStopSearch = true; res.json({ success: true }); });
 app.post('/delete-downloads', (req, res) => {
-    req.body.filenames.forEach(f => {
-        const p = path.join(DOWNLOAD_DIR, f);
-        if(fs.existsSync(p)) fs.unlinkSync(p);
-    });
+    req.body.filenames.forEach(f => { const p = path.join(DOWNLOAD_DIR, f); if(fs.existsSync(p)) fs.unlinkSync(p); });
     res.json({ success: true });
 });
 
+server.listen(port, () => { console.log(`Dashboard rodando em: http://localhost:${port}`); });
 loadSchedules();
-server.listen(port, () => console.log(`Dashboard: http://localhost:${port}`));
-cleanSessionData();
 client.initialize();
