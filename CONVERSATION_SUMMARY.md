@@ -4,6 +4,15 @@ Este arquivo serve como "ponte de memória" para que futuras conversas de IA sai
 
 ---
 
+## 📜 DIRETRIZES OBRIGATÓRIAS (Regras da Casa)
+
+1.  **Modificações Estritas:** Somente alterar o código **diretamente solicitado**. NUNCA refatorar ou mexer em outras partes sem permissão explícita.
+2.  **Objetividade:** Respostas sempre curtas, precisas e em Português do Brasil.
+3.  **Não 'Limpar' o Código:** Não apagar comentários ou mudar estilo de escrita de partes não solicitadas.
+
+---
+
+
 ## 🚀 Estado Atual (2026-03-19)
 
 O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashboard interativo.
