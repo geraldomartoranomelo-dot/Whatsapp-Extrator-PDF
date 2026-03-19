@@ -43,13 +43,28 @@ function saveSchedules() {
     fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(data, null, 2));
 }
 
+function removeSchedule(id) {
+    if (activeSchedules[id]) { 
+        activeSchedules[id].jobs.forEach(j => j.stop()); 
+        delete activeSchedules[id]; 
+        saveSchedules(); 
+        io.emit('schedule_deleted', id);
+    }
+}
+
 function loadSchedules() {
     if (fs.existsSync(SCHEDULES_FILE)) {
         try {
             const data = JSON.parse(fs.readFileSync(SCHEDULES_FILE));
             if (Array.isArray(data)) {
                 data.forEach(s => {
-                    const jobs = s.cronTimes.map(ct => cron.schedule(ct, () => executeDownload(s.groupName, [new Date().toISOString().split('T')[0]])));
+                    const jobs = s.cronTimes.map(ct => cron.schedule(ct, async () => {
+                        console.log(`[Cron] Iniciando execução para: ${s.groupName}`);
+                        const r = await executeDownload(s.groupName, [new Date().toISOString().split('T')[0]]);
+                        io.emit('search_end', { message: r.message });
+                        console.log(`[Cron] Concluído. Removendo agendamento: ${s.id}`);
+                        removeSchedule(s.id);
+                    }));
                     activeSchedules[s.id] = { jobs, ...s };
                 });
             }
@@ -374,10 +389,14 @@ app.get('/', (req, res) => {
                     });
                 }
 
+                socket.on('schedule_deleted', id => {
+                    const schList = document.getElementById('scheduleList');
+                    loadSchedulesList(); // Recarrega a lista visual
+                });
+
                 async function deleteSchedule(id) { 
                     if(!confirm('Deseja excluir este agendamento?')) return; 
                     await fetch('/schedule/' + id, { method: 'DELETE' }); 
-                    loadSchedulesList(); 
                 }
 
                 async function deleteSelected() {
@@ -432,7 +451,13 @@ app.post('/schedule', (req, res) => {
         descParts.push('Datas: ' + dates.join(', '));
     }
 
-    const jobs = cronTimes.map(ct => cron.schedule(ct, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]])));
+    const jobs = cronTimes.map(ct => cron.schedule(ct, async () => {
+        console.log(`[Cron] Iniciando execução para: ${groupName}`);
+        const r = await executeDownload(groupName, [new Date().toISOString().split('T')[0]]);
+        io.emit('search_end', { message: r.message });
+        console.log(`[Cron] Concluído. Removendo agendamento: ${id}`);
+        removeSchedule(id);
+    }));
     const desc = descParts.join(' | ') + ` às ${time}`;
     activeSchedules[id] = { jobs, groupName, days, dates, time, desc, cronTimes };
     saveSchedules();
@@ -440,8 +465,7 @@ app.post('/schedule', (req, res) => {
 });
 
 app.delete('/schedule/:id', (req, res) => {
-    const id = req.params.id;
-    if (activeSchedules[id]) { activeSchedules[id].jobs.forEach(j => j.stop()); delete activeSchedules[id]; saveSchedules(); }
+    removeSchedule(req.params.id);
     res.json({ success: true });
 });
 
