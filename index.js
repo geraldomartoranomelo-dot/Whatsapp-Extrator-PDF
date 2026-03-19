@@ -35,9 +35,10 @@ function saveSchedules() {
         id,
         groupName: activeSchedules[id].groupName,
         days: activeSchedules[id].days,
+        dates: activeSchedules[id].dates,
         time: activeSchedules[id].time,
         desc: activeSchedules[id].desc,
-        cronTime: activeSchedules[id].cronTime
+        cronTimes: activeSchedules[id].cronTimes
     }));
     fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(data, null, 2));
 }
@@ -48,8 +49,8 @@ function loadSchedules() {
             const data = JSON.parse(fs.readFileSync(SCHEDULES_FILE));
             if (Array.isArray(data)) {
                 data.forEach(s => {
-                    const job = cron.schedule(s.cronTime, () => executeDownload(s.groupName, [new Date().toISOString().split('T')[0]]));
-                    activeSchedules[s.id] = { job, ...s };
+                    const jobs = s.cronTimes.map(ct => cron.schedule(ct, () => executeDownload(s.groupName, [new Date().toISOString().split('T')[0]])));
+                    activeSchedules[s.id] = { jobs, ...s };
                 });
             }
         } catch (e) {
@@ -211,6 +212,8 @@ app.get('/', (req, res) => {
                             <label><input type="checkbox" class="sc-day" value="6">Sáb</label>
                             <label><input type="checkbox" class="sc-day" value="0">Dom</label>
                         </div>
+                        <label>📅 Ou Datas Fixas (Opcional)</label>
+                        <input type="text" id="scDates" placeholder="Selecione datas específicas">
                         <label>⏰ Horário da Varredura</label>
                         <input type="time" id="scTime" value="18:00">
                         <button onclick="executeSchedule()">+ Criar Agendamento</button>
@@ -248,6 +251,7 @@ app.get('/', (req, res) => {
                 const schedulesArea = document.getElementById('scheduleList');
 
                 flatpickr("#targetDates", { mode: "multiple", dateFormat: "Y-m-d", locale: "pt", defaultDate: [new Date()] });
+                flatpickr("#scDates", { mode: "multiple", dateFormat: "Y-m-d", locale: "pt" });
 
                 const savedGroup = localStorage.getItem('extrator_group_v2');
                 if (savedGroup) document.getElementById('groupName').value = savedGroup;
@@ -285,16 +289,18 @@ app.get('/', (req, res) => {
                     loadingArea.style.display = 'block';
                     progressBar.style.width = '0%';
                     statusLabel.innerText = 'Iniciando busca no WhatsApp...';
-                    fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, dates: d.split(', ') }) });
+                    await fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, dates: d.split(', ') }) });
                 }
 
                 async function executeSchedule() {
                     const g = document.getElementById('groupName').value;
                     const h = document.getElementById('scTime').value;
+                    const d = document.getElementById('scDates').value;
                     let days = document.getElementById('scAll').checked ? ['*'] : Array.from(document.querySelectorAll('.sc-day:checked')).map(cb => cb.value);
-                    if(!g || days.length === 0 || !h) return alert('Preecha todos os dados do agendamento.');
+                    if(!g || !h) return alert('Por favor, preencha o grupo e o horário.');
+                    if(days.length === 0 && !d) return alert('Selecione dias da semana ou datas específicas.');
                     localStorage.setItem('extrator_group_v2', g);
-                    await fetch('/schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, days, time: h }) });
+                    await fetch('/schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, days, time: h, dates: d ? d.split(', ') : [] }) });
                     loadSchedulesList();
                 }
 
@@ -327,7 +333,7 @@ app.get('/', (req, res) => {
                 
                 socket.on('search_progress', p => { 
                     progressBar.style.width = p.percent + '%';
-                    statusLabel.innerText = 'Lendo mensagens: ' + p.current + ' de ' + p.total;
+                    statusLabel.innerText = p.percent === 100 ? 'Finalizando extração...' : 'Lendo mensagens: ' + p.current + ' de ' + p.total;
                 });
 
                 socket.on('search_start', m => { 
@@ -336,8 +342,11 @@ app.get('/', (req, res) => {
                 });
 
                 socket.on('search_end', m => { 
-                    loadingArea.style.display = 'none'; 
-                    alert(m.message); 
+                    statusLabel.innerText = m.message;
+                    setTimeout(() => {
+                        loadingArea.style.display = 'none'; 
+                        progressBar.style.width = '0%';
+                    }, 2500);
                 });
 
                 socket.on('status', s => { 
@@ -402,19 +411,37 @@ app.get('/schedules', (req, res) => {
 });
 
 app.post('/schedule', (req, res) => {
-    const { groupName, days, time } = req.body;
+    const { groupName, days, time, dates } = req.body;
     const id = Date.now().toString();
     const [h, m] = time.split(':');
-    const ct = days.includes('*') ? `${m} ${h} * * *` : `${m} ${h} * * ${days.join(',')}`;
-    const job = cron.schedule(ct, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]]));
-    activeSchedules[id] = { job, groupName, days, time, desc: `Dias [${days}] às ${time}`, cronTime: ct };
+    const cronTimes = [];
+    let descParts = [];
+
+    if (days && days.length > 0) {
+        const ct = days.includes('*') ? `${m} ${h} * * *` : `${m} ${h} * * ${days.join(',')}`;
+        cronTimes.push(ct);
+        const dayNames = { "1": "Seg", "2": "Ter", "3": "Qua", "4": "Qui", "5": "Sex", "6": "Sáb", "0": "Dom", "*": "Todos" };
+        descParts.push('Repete: ' + (days.includes('*') ? 'Diário' : days.map(d => dayNames[d]).join(', ')));
+    }
+
+    if (dates && dates.length > 0) {
+        dates.forEach(dStr => {
+            const [y, mm, dd] = dStr.split('-');
+            cronTimes.push(`${m} ${h} ${parseInt(dd)} ${parseInt(mm)} *`);
+        });
+        descParts.push('Datas: ' + dates.join(', '));
+    }
+
+    const jobs = cronTimes.map(ct => cron.schedule(ct, () => executeDownload(groupName, [new Date().toISOString().split('T')[0]])));
+    const desc = descParts.join(' | ') + ` às ${time}`;
+    activeSchedules[id] = { jobs, groupName, days, dates, time, desc, cronTimes };
     saveSchedules();
     res.json({ success: true });
 });
 
 app.delete('/schedule/:id', (req, res) => {
     const id = req.params.id;
-    if (activeSchedules[id]) { activeSchedules[id].job.stop(); delete activeSchedules[id]; saveSchedules(); }
+    if (activeSchedules[id]) { activeSchedules[id].jobs.forEach(j => j.stop()); delete activeSchedules[id]; saveSchedules(); }
     res.json({ success: true });
 });
 
