@@ -99,49 +99,53 @@ client.on('ready', () => {
 
 let shouldStopSearch = false;
 
-const executeDownload = async (groupName, targetDates) => {
+const executeDownload = async (groupNames, targetDates) => {
     if (!isReady) return { success: false, message: 'WhatsApp não conectado.' };
     shouldStopSearch = false;
+    const groups = Array.isArray(groupNames) ? groupNames : [groupNames];
+    const datesArray = Array.isArray(targetDates) ? targetDates : [targetDates];
+    let totalDownloaded = 0;
     try {
         const chats = await client.getChats();
-        const group = chats.find(c => c.isGroup && c.name.toLowerCase().includes(groupName.toLowerCase()));
-        if (!group) return { success: false, message: 'Grupo não encontrado.' };
-
-        const datesArray = Array.isArray(targetDates) ? targetDates : [targetDates];
-        io.emit('search_start', { message: `Varrendo "${group.name}"...` });
-
-        const messages = await group.fetchMessages({ limit: 1000 });
-        const total = messages.length;
-        let downloadedCount = 0;
-        let processed = 0;
-
-        for (const msg of messages) {
+        for (const groupName of groups) {
             if (shouldStopSearch) break;
-            processed++;
-            if (processed % 10 === 0 || processed === total) {
-                io.emit('search_progress', { 
-                    percent: Math.round((processed / total) * 100),
-                    current: processed,
-                    total: total
-                });
-            }
+            const group = chats.find(c => c.isGroup && c.name.toLowerCase().includes(groupName.trim().toLowerCase()));
+            if (!group) { io.emit('search_start', { message: `Grupo "${groupName}" não encontrado, pulando...` }); continue; }
 
-            const msgDate = new Date(msg.timestamp * 1000).toISOString().split('T')[0];
-            if (datesArray.includes(msgDate) && msg.hasMedia) {
-                const media = await msg.downloadMedia();
-                if (media && media.mimetype === 'application/pdf') {
-                    const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `documento.pdf`;
-                    const filename = `${msg.timestamp}_${baseName}`;
-                    fs.writeFileSync(path.join(DOWNLOAD_DIR, filename), media.data, { encoding: 'base64' });
-                    io.emit('pdf_downloaded', { 
-                        name: filename, 
-                        size: (media.data.length * 0.75 / 1024 / 1024).toFixed(2) + ' MB'
+            io.emit('search_start', { message: `Varrendo "${group.name}"...` });
+            const messages = await group.fetchMessages({ limit: 1000 });
+            const total = messages.length;
+            let downloadedCount = 0;
+            let processed = 0;
+
+            for (const msg of messages) {
+                if (shouldStopSearch) break;
+                processed++;
+                if (processed % 10 === 0 || processed === total) {
+                    io.emit('search_progress', { 
+                        percent: Math.round((processed / total) * 100),
+                        current: processed,
+                        total: total
                     });
-                    downloadedCount++;
+                }
+                const msgDate = new Date(msg.timestamp * 1000).toISOString().split('T')[0];
+                if (datesArray.includes(msgDate) && msg.hasMedia) {
+                    const media = await msg.downloadMedia();
+                    if (media && media.mimetype === 'application/pdf') {
+                        const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `documento.pdf`;
+                        const filename = `${msg.timestamp}_${baseName}`;
+                        fs.writeFileSync(path.join(DOWNLOAD_DIR, filename), media.data, { encoding: 'base64' });
+                        io.emit('pdf_downloaded', { 
+                            name: filename, 
+                            size: (media.data.length * 0.75 / 1024 / 1024).toFixed(2) + ' MB'
+                        });
+                        downloadedCount++;
+                    }
                 }
             }
+            totalDownloaded += downloadedCount;
         }
-        return { success: true, count: downloadedCount, message: `Busca finalizada: ${downloadedCount} PDFs obtidos.` };
+        return { success: true, count: totalDownloaded, message: `Busca finalizada: ${totalDownloaded} PDFs obtidos.` };
     } catch (err) { return { success: false, message: err.message }; }
 };
 
@@ -203,7 +207,8 @@ app.get('/', (req, res) => {
                 <div class="card">
                     <h2>Extração ⚙️</h2>
                     <label>📌 Nome do Grupo</label>
-                    <input type="text" id="groupName" placeholder="Ex: Financeiro Vendas">
+                    <input type="text" id="groupName" placeholder="Ex: Financeiro, Compras, RH (separe por vírgula)">
+                    <p style="font-size:0.75rem; color:#888; margin: -8px 0 15px 2px;">💡 Para múltiplos grupos, separe por vírgula. Ex: <i>Compras JT, Financeiro</i></p>
                     
                     <div class="tabs">
                         <div class="tab active" onclick="switchTab('now')">Baixar Agora</div>
@@ -304,7 +309,8 @@ app.get('/', (req, res) => {
                     loadingArea.style.display = 'block';
                     progressBar.style.width = '0%';
                     statusLabel.innerText = 'Iniciando busca no WhatsApp...';
-                    await fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, dates: d.split(', ') }) });
+                    const groups = g.split(',').map(x => x.trim()).filter(x => x);
+                    await fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: groups, dates: d.split(', ') }) });
                 }
 
                 async function executeSchedule() {
@@ -315,7 +321,8 @@ app.get('/', (req, res) => {
                     if(!g || !h) return alert('Por favor, preencha o grupo e o horário.');
                     if(days.length === 0 && !d) return alert('Selecione dias da semana ou datas específicas.');
                     localStorage.setItem('extrator_group_v2', g);
-                    await fetch('/schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: g, days, time: h, dates: d ? d.split(', ') : [] }) });
+                    const groups = g.split(',').map(x => x.trim()).filter(x => x);
+                    await fetch('/schedule', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: groups, days, time: h, dates: d ? d.split(', ') : [] }) });
                     loadSchedulesList();
                 }
 

@@ -29,6 +29,7 @@ O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashbo
 6.  **Gestão de PDFs:** Listagem, contagem e exclusão direta pelo dashboard.
 7.  **UX Corrigida:** Barra de progresso com auto-hide após conclusão (sem alertas bloqueantes).
 8.  **Auto-Exclusão de Agendamentos:** Após executar, o agendamento é removido automaticamente da lista e do `schedules.json`. O Dashboard atualiza em tempo real via Socket.io (`schedule_deleted`).
+9.  **Múltiplos Grupos:** O campo "Nome do Grupo" aceita vários grupos separados por vírgula. O sistema varre cada grupo em sequência. Dica de uso exibida abaixo do campo no Dashboard.
 
 ### 📁 Arquivos Chave:
 -   `index.js`: Motor do sistema (Express, Socket.io, Puppeteer).
@@ -47,4 +48,4 @@ O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashbo
 -   Exibir QR Code diretamente no Dashboard HTML.
 
 ---
-**Nota para a IA:** Última feature: auto-exclusão de agendamentos após execução (`removeSchedule` + `io.emit('search_end')` no callback do cron). Git atualizado.
+**Nota para a IA:** Última feature: suporte a múltiplos grupos (separados por vírgula) em `executeDownload`. Frontend faz split e envia array. Git atualizado (2026-03-20).
