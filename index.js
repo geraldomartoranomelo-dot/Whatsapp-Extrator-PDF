@@ -79,6 +79,16 @@ function loadSchedules() {
     }
 }
 
+// Limpeza automática do cache do navegador (evita que .wwebjs_auth cresça infinitamente)
+const sessionPath = path.join(__dirname, '.wwebjs_auth', 'session', 'Default');
+const cacheFolders = ['Cache', 'Code Cache', 'Service Worker', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache'];
+for (const folder of cacheFolders) {
+    const target = path.join(sessionPath, folder);
+    if (fs.existsSync(target)) {
+        try { fs.rmSync(target, { recursive: true, force: true }); console.log(`[Limpeza] Cache removido: ${folder}`); } catch(e) {}
+    }
+}
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -351,7 +361,10 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="sidebar">
-                <div id="appStatus" class="status-badge warning">Iniciando...</div>
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                    <div id="appStatus" class="status-badge warning">Iniciando...</div>
+                    <button onclick="clearAll()" style="width:auto; padding:6px 12px; font-size:0.7rem; background:#ef4444; color:white; border-radius:6px;">🗑️ Limpar Tudo</button>
+                </div>
                 <div class="card">
                     <h2>Extração ⚙️</h2>
                     <label>📌 Nome do Grupo</label>
@@ -492,6 +505,17 @@ app.get('/', (req, res) => {
                 
                 function toggleSelectAll(el) { 
                     document.querySelectorAll('.pdf-cb').forEach(cb => cb.checked = el.checked); 
+                }
+
+                async function clearAll() {
+                    if (!confirm('Tem certeza? Isso vai apagar TODOS os PDFs e Markdowns das 3 pastas.')) return;
+                    const r = await fetch('/clear-all', { method: 'POST' });
+                    const res = await r.json();
+                    if (res.success) {
+                        pdfList.innerHTML = '<p id="emptyMsg" style="text-align:center; color:#8696a0; padding:60px;">Nenhum PDF encontrado ainda.</p>';
+                        updateCount();
+                        alert(res.deleted + ' arquivos removidos com sucesso!');
+                    }
                 }
 
                 async function stopSearch() { 
@@ -773,6 +797,24 @@ app.post('/stop-search', (req, res) => {
         console.log('[Python] Processo de conversão encerrado pelo usuário.');
     }
     res.json({ success: true });
+});
+
+app.post('/clear-all', (req, res) => {
+    const folders = [
+        DOWNLOAD_DIR,
+        path.join(__dirname, 'extrator', 'Entrada'),
+        path.join(__dirname, 'extrator', 'Saida')
+    ];
+    let deleted = 0;
+    for (const folder of folders) {
+        if (!fs.existsSync(folder)) continue;
+        const files = fs.readdirSync(folder).filter(f => f.endsWith('.pdf') || f.endsWith('.md'));
+        for (const f of files) {
+            try { fs.unlinkSync(path.join(folder, f)); deleted++; } catch(e) {}
+        }
+    }
+    console.log(`[Limpeza] ${deleted} arquivos removidos das 3 pastas.`);
+    res.json({ success: true, deleted });
 });
 app.post('/delete-downloads', (req, res) => {
     let deleted = 0;
