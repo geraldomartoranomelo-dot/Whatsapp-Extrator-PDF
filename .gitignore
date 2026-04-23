@@ -2,6 +2,9 @@ node_modules/
 .wwebjs_auth/
 .wwebjs_cache/
 PDFS_Baixados/
+extrator/Entrada/
+extrator/Saida/
+extrator/tesseract_installer.exe
 qr.png
 *.log
 schedules.json

@@ -32,16 +32,21 @@ O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashbo
 9.  **Busca de Múltiplos Grupos Ultra-Flexível:** O campo aceita vários grupos. O motor ignora espaços, emojis, formatações ocultas do WhatsApp e funciona até com "Grupos de Avisos de Comunidade".
 10. **Motor de Busca à Prova de Falhas (IndexedDB):** Bypassa completamente os métodos falhos do WhatsApp Web, extraindo o histórico e mídias diretamente do banco de dados interno do navegador (IndexedDB - model-storage).
 11. **Conversor Python Inteligente:** Script otimizado para não travar no console ao imprimir arquivos com caracteres Unicode/Chineses/Emojis (`utf-8`).
+12. **Tema Escuro:** Interface completa no estilo Dark Mode do WhatsApp Web (tons `#111b21`, `#202c33`, `#00a884`).
+13. **Barra de Progresso por Página:** A conversão para Markdown agora reporta progresso página a página (não por arquivo), com porcentagem exata de 0% a 100%. Python roda com `-u` (unbuffered) para atualização em tempo real.
+14. **Botão PARAR Conversão:** O botão "PARAR BUSCA" agora também mata o processo Python de conversão (`activePythonProcess.kill()`).
 
 ### 📁 Arquivos Chave:
 -   `index.js`: Motor do sistema (Express, Socket.io, Puppeteer).
+-   `extrator/conversor.py`: Conversor de PDF para Markdown (página por página).
 -   `PDFS_Baixados/`: Pasta de armazenamento dos arquivos.
 -   `schedules.json`: Banco de dados dos agendamentos.
 -   `1 - INICIAR SISTEMA.bat`: Inicializador inteligente.
+-   `.gitignore`: Exclui PDFs (`extrator/Entrada/`, `extrator/Saida/`, `PDFS_Baixados/`) do repositório.
 
 ### 📌 Git e GitHub:
 -   Repositório: `geraldomartoranomelo-dot/Whatsapp-Extrator-PDF`
--   Branch principal: `main` (Sincronizado com as melhorias de hoje).
+-   Branch principal: `main` (Sincronizado em 2026-04-23).
 
 ---
 
@@ -50,4 +55,4 @@ O projeto é um **extrator de arquivos PDF de grupos do WhatsApp** com um Dashbo
 -   Exibir QR Code diretamente no Dashboard HTML.
 
 ---
-**Nota para a IA:** Última feature: suporte a múltiplos grupos (separados por vírgula) em `executeDownload`. Frontend faz split e envia array. Git atualizado (2026-03-20).
+**Nota para a IA:** Última atualização: 2026-04-23. Tema escuro, barra de progresso milimétrica por página, botão parar conversão, busca ultra-flexível de grupos e `.gitignore` atualizado. PDFs NÃO devem ser commitados.
