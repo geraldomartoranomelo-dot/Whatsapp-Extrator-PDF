@@ -6,6 +6,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cron = require('node-cron');
+const { spawn } = require('child_process');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -91,8 +93,22 @@ client.on('qr', (qr) => {
     io.emit('status', { message: 'Escaneie o QR Code no terminal', type: 'warning' });
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
     console.log('WhatsApp Conectado!');
+    
+    // Patch para corrigir bug "waitForChatLoading" do WhatsApp Web
+    try {
+        await client.pupPage.evaluate(() => {
+            if (window.Store && window.Store.Chat && !window.Store.Chat.waitForChatLoading) {
+                window.Store.Chat.waitForChatLoading = () => Promise.resolve();
+                console.log('[Patch] waitForChatLoading corrigido.');
+            }
+        });
+        console.log('[Patch] Correção do WhatsApp Web aplicada.');
+    } catch(e) {
+        console.log('[Patch] Aviso: ' + e.message);
+    }
+    
     isReady = true;
     io.emit('status', { message: 'WhatsApp Conectado!', type: 'success' });
 });
@@ -100,25 +116,144 @@ client.on('ready', () => {
 let shouldStopSearch = false;
 
 const executeDownload = async (groupNames, targetDates) => {
-    if (!isReady) return { success: false, message: 'WhatsApp não conectado.' };
+    if (!isReady) { console.log('[Busca] WhatsApp não conectado.'); return { success: false, message: 'WhatsApp não conectado.' }; }
     shouldStopSearch = false;
     const groups = Array.isArray(groupNames) ? groupNames : [groupNames];
     const datesArray = Array.isArray(targetDates) ? targetDates : [targetDates];
+    console.log(`[Busca] Grupos: ${groups.join(', ')} | Datas: ${datesArray.join(', ')}`);
     let totalDownloaded = 0;
     try {
+        console.log('[Busca] Carregando lista de chats...');
         const chats = await client.getChats();
+        console.log(`[Busca] ${chats.length} chats carregados. Procurando grupos...`);
         for (const groupName of groups) {
             if (shouldStopSearch) break;
-            const group = chats.find(c => c.isGroup && c.name.toLowerCase().includes(groupName.trim().toLowerCase()));
-            if (!group) { io.emit('search_start', { message: `Grupo "${groupName}" não encontrado, pulando...` }); continue; }
+            
+            // Função para limpar TUDO (espaços, underlines, emojis, pontuação) e deixar só letras/números
+            const normalizeStr = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/gi, '') : '';
+            const searchNormalized = normalizeStr(groupName);
+            
+            // Removemos o c.isGroup porque grupos de "Avisos" de Comunidades às vezes não são marcados como isGroup pelo WWebJS
+            const group = chats.find(c => 
+                c.name && normalizeStr(c.name).includes(searchNormalized)
+            );
+            
+            if (!group) { 
+                console.log(`[Busca] ❌ Grupo "${groupName}" NÃO encontrado.`);
+                
+                // Tenta achar nomes parecidos apenas para mostrar no terminal e ajudar a diagnosticar
+                const parts = groupName.toLowerCase().split(' ').filter(p => p.length > 3);
+                const similar = chats.filter(c => c.name && parts.some(p => c.name.toLowerCase().includes(p))).map(c => c.name);
+                if (similar.length > 0) {
+                    console.log(`[Busca] 🕵️ Nomes parecidos na sua lista do WhatsApp:`);
+                    console.log(` -> ${similar.join('\\n -> ')}`);
+                }
+                
+                io.emit('search_start', { message: `Grupo "${groupName}" não encontrado, pulando...` }); 
+                continue; 
+            }
 
+            console.log(`[Busca] ✅ Grupo encontrado: "${group.name}". Buscando mensagens via método direto...`);
             io.emit('search_start', { message: `Varrendo "${group.name}"...` });
-            const messages = await group.fetchMessages({ limit: 1000 });
-            const total = messages.length;
+            
+            // Método direto: busca IDs das mensagens via Puppeteer (bypassa fetchMessages)
+            const chatId = group.id._serialized;
+            console.log(`[Busca] Chat ID: ${chatId}. Abrindo chat e carregando mensagens...`);
+            
+            const result = await client.pupPage.evaluate(async (cid) => {
+                const logs = [];
+                const log = (msg) => logs.push(msg);
+                
+                log(`[WA-DB] Iniciando leitura direta do banco de dados para o grupo: ${cid}...`);
+                
+                return new Promise((resolve) => {
+                    try {
+                        const req = indexedDB.open('model-storage');
+                        req.onsuccess = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains('message')) {
+                                log('[WA-DB] Banco "message" não encontrado!');
+                                resolve({ logs, msgs: [] });
+                                return;
+                            }
+                            
+                            const tx = db.transaction('message', 'readonly');
+                            const store = tx.objectStore('message');
+                            const msgs = [];
+                            
+                            const cursorReq = store.openCursor();
+                            let count = 0;
+                            
+                            cursorReq.onsuccess = (event) => {
+                                const cursor = event.target.result;
+                                if (cursor) {
+                                    count++;
+                                    const m = cursor.value;
+                                    
+                                    // Verifica se a mensagem pertence a este grupo
+                                    let belongsToChat = false;
+                                    let serializedId = '';
+                                    
+                                    if (m && m.id) {
+                                        if (typeof m.id === 'object') {
+                                            belongsToChat = (m.id.remote === cid);
+                                            serializedId = m.id._serialized || `${m.id.fromMe ? 'true' : 'false'}_${m.id.remote}_${m.id.id}`;
+                                        } else if (typeof m.id === 'string') {
+                                            belongsToChat = m.id.includes(cid);
+                                            serializedId = m.id;
+                                        }
+                                    }
+                                    
+                                    if (belongsToChat) {
+                                        const isDoc = m.type === 'document' || m.type === 'pdf' || m.isMedia;
+                                        if (isDoc) {
+                                            // Injeta na memória para que o WWebJS consiga baixar a mídia
+                                            if (window.Store && window.Store.Msg && !window.Store.Msg.get(serializedId)) {
+                                                try { window.Store.Msg.add(m); } catch(err) {}
+                                            }
+                                            
+                                            msgs.push({
+                                                id: serializedId,
+                                                timestamp: m.t,
+                                                type: m.type,
+                                                hasMedia: true
+                                            });
+                                        }
+                                    }
+                                    cursor.continue();
+                                } else {
+                                    log(`[WA-DB] Leitura finalizada. ${count} mensagens gerais analisadas.`);
+                                    log(`[WA-DB] Encontrados ${msgs.length} arquivos de mídia neste grupo.`);
+                                    msgs.sort((a, b) => b.timestamp - a.timestamp); // Ordena das mais novas para mais antigas
+                                    resolve({ logs, msgs });
+                                }
+                            };
+                            cursorReq.onerror = () => {
+                                log('[WA-DB] Erro no cursor: ' + cursorReq.error);
+                                resolve({ logs, msgs: [] });
+                            };
+                        };
+                        req.onerror = () => {
+                            log('[WA-DB] Erro ao abrir IndexedDB: ' + req.error);
+                            resolve({ logs, msgs: [] });
+                        };
+                    } catch (err) {
+                        log('[WA-DB] Erro catastrófico: ' + err.message);
+                        resolve({ logs, msgs: [] });
+                    }
+                });
+            }, chatId);
+            
+            if (result.logs) result.logs.forEach(l => console.log(l));
+            const msgIds = result.msgs || [];
+            
+            const total = msgIds.length;
+            console.log(`[Busca] ${total} mensagens encontradas. Filtrando por data e mídia...`);
             let downloadedCount = 0;
             let processed = 0;
+            let mediaCount = 0;
 
-            for (const msg of messages) {
+            for (const msgData of msgIds) {
                 if (shouldStopSearch) break;
                 processed++;
                 if (processed % 10 === 0 || processed === total) {
@@ -128,25 +263,36 @@ const executeDownload = async (groupNames, targetDates) => {
                         total: total
                     });
                 }
-                const msgDate = new Date(msg.timestamp * 1000).toISOString().split('T')[0];
-                if (datesArray.includes(msgDate) && msg.hasMedia) {
-                    const media = await msg.downloadMedia();
-                    if (media && media.mimetype === 'application/pdf') {
-                        const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `documento.pdf`;
-                        const filename = `${msg.timestamp}_${baseName}`;
-                        fs.writeFileSync(path.join(DOWNLOAD_DIR, filename), media.data, { encoding: 'base64' });
-                        io.emit('pdf_downloaded', { 
-                            name: filename, 
-                            size: (media.data.length * 0.75 / 1024 / 1024).toFixed(2) + ' MB'
-                        });
-                        downloadedCount++;
+                const msgDate = new Date(msgData.timestamp * 1000).toISOString().split('T')[0];
+                if (datesArray.includes(msgDate) && msgData.hasMedia) {
+                    mediaCount++;
+                    try {
+                        const msg = await client.getMessageById(msgData.id);
+                        if (msg && msg.hasMedia) {
+                            const media = await msg.downloadMedia();
+                            if (media && media.mimetype === 'application/pdf') {
+                                const baseName = media.filename ? media.filename.replace(/[/\\?%*:|"<>]/g, '') : `documento.pdf`;
+                                const filename = `${msgData.timestamp}_${baseName}`;
+                                fs.writeFileSync(path.join(DOWNLOAD_DIR, filename), media.data, { encoding: 'base64' });
+                                io.emit('pdf_downloaded', { 
+                                    name: filename, 
+                                    size: (media.data.length * 0.75 / 1024 / 1024).toFixed(2) + ' MB'
+                                });
+                                downloadedCount++;
+                                console.log(`[Busca] 📄 PDF baixado: ${filename}`);
+                            }
+                        }
+                    } catch(dlErr) {
+                        console.log(`[Busca] ⚠️ Erro ao baixar mídia: ${dlErr.message}`);
                     }
                 }
             }
+            console.log(`[Busca] Grupo "${group.name}": ${mediaCount} mídias na data, ${downloadedCount} PDFs baixados.`);
             totalDownloaded += downloadedCount;
         }
+        console.log(`[Busca] ✅ Finalizado! Total: ${totalDownloaded} PDFs.`);
         return { success: true, count: totalDownloaded, message: `Busca finalizada: ${totalDownloaded} PDFs obtidos.` };
-    } catch (err) { return { success: false, message: err.message }; }
+    } catch (err) { console.log(`[Busca] ❌ ERRO: ${err.message}`); return { success: false, message: err.message }; }
 };
 
 app.get('/', (req, res) => {
@@ -255,6 +401,7 @@ app.get('/', (req, res) => {
                     <h2>PDFs Encontrados <span id="fileCount" style="background:#e2e8f0; padding:4px 12px; border-radius:20px; font-size:0.9rem;">0</span></h2>
                     <div class="selection-grp">
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 600;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"> Selecionar Todos</label>
+                        <button onclick="runConversion()" style="width: auto; padding: 8px 18px; font-size: 0.85rem; background: #2563eb; color: white;">Converter para Markdown</button>
                         <button onclick="deleteSelected()" class="btn-danger" style="width: auto; padding: 8px 18px; font-size: 0.85rem;">Excluir Seleção</button>
                     </div>
                 </div>
@@ -270,9 +417,58 @@ app.get('/', (req, res) => {
                 const statusLabel = document.getElementById('loadingText');
                 const schedulesArea = document.getElementById('scheduleList');
 
-                flatpickr("#targetDates", { mode: "multiple", dateFormat: "Y-m-d", locale: "pt", defaultDate: [new Date()] });
+                // Lógica para Shift + Clique no Calendário (Múltiplas Datas + Range)
+                let isShiftPressed = false;
+                document.addEventListener('keydown', e => { if (e.key === 'Shift') isShiftPressed = true; });
+                document.addEventListener('keyup', e => { if (e.key === 'Shift') isShiftPressed = false; });
+                
+                let lastSelectedDate = null;
+                let previousDates = [];
+
+                flatpickr("#targetDates", { 
+                    mode: "multiple", 
+                    dateFormat: "Y-m-d", 
+                    locale: "pt", 
+                    defaultDate: [new Date()],
+                    onReady: function(selectedDates) {
+                        previousDates = [...selectedDates];
+                        if (selectedDates.length > 0) lastSelectedDate = selectedDates[selectedDates.length - 1];
+                    },
+                    onChange: function(selectedDates, dateStr, instance) {
+                        // Verifica qual data foi adicionada
+                        const addedDates = selectedDates.filter(d => !previousDates.some(p => p.getTime() === d.getTime()));
+                        
+                        if (addedDates.length === 1) {
+                            const newDate = addedDates[0];
+                            if (isShiftPressed && lastSelectedDate) {
+                                // Preenche o período
+                                const range = [];
+                                let curr = new Date(Math.min(lastSelectedDate, newDate));
+                                const end = new Date(Math.max(lastSelectedDate, newDate));
+                                while (curr <= end) {
+                                    range.push(new Date(curr));
+                                    curr.setDate(curr.getDate() + 1);
+                                }
+                                
+                                const allDatesMap = new Map();
+                                previousDates.forEach(d => allDatesMap.set(d.getTime(), d));
+                                range.forEach(d => allDatesMap.set(d.getTime(), d));
+                                
+                                const finalDates = Array.from(allDatesMap.values());
+                                instance.setDate(finalDates, false); // Atualiza visualmente sem loop
+                                previousDates = finalDates;
+                                lastSelectedDate = newDate;
+                                return;
+                            }
+                            lastSelectedDate = newDate;
+                        }
+                        previousDates = [...selectedDates];
+                    }
+                });
+                
                 flatpickr("#scDates", { mode: "multiple", dateFormat: "Y-m-d", locale: "pt" });
 
+                // Recupera grupo salvo
                 const savedGroup = localStorage.getItem('extrator_group_v2');
                 if (savedGroup) document.getElementById('groupName').value = savedGroup;
 
@@ -305,12 +501,23 @@ app.get('/', (req, res) => {
                     const g = document.getElementById('groupName').value;
                     const d = document.getElementById('targetDates').value;
                     if(!g || !d) return alert('Por favor, preencha o grupo e as datas.');
+                    
                     localStorage.setItem('extrator_group_v2', g);
                     loadingArea.style.display = 'block';
                     progressBar.style.width = '0%';
                     statusLabel.innerText = 'Iniciando busca no WhatsApp...';
+                    
                     const groups = g.split(',').map(x => x.trim()).filter(x => x);
+                    
                     await fetch('/fetch-pdfs', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ groupName: groups, dates: d.split(', ') }) });
+                }
+
+                async function runConversion() {
+                    statusLabel.innerText = 'Iniciando conversão para Markdown...';
+                    loadingArea.style.display = 'block';
+                    const r = await fetch('/convert', { method: 'POST' });
+                    const res = await r.json();
+                    if(!res.success) alert('Erro na conversão: ' + res.message);
                 }
 
                 async function executeSchedule() {
@@ -330,19 +537,15 @@ app.get('/', (req, res) => {
                     if(document.getElementById('emptyMsg')) document.getElementById('emptyMsg').remove();
                     const row = document.createElement('div');
                     row.className = 'pdf-item';
-                    
-                    // Estrutura interna concatenada para evitar problemas de escape de backticks
                     row.innerHTML = '<input type="checkbox" class="pdf-cb" style="width:20px; height:20px; min-width:20px;">' +
                                      '<div class="pdf-icon" style="margin: 0 10px;">PDF</div>' +
                                      '<div class="pdf-info">' +
                                         '<div class="pdf-name" style="color:#333; font-weight:bold;"></div>' +
                                         '<div class="pdf-meta" style="color:#666; font-size:0.8rem;"></div>' +
                                      '</div>';
-                    
                     row.querySelector('.pdf-cb').value = f.name;
                     row.querySelector('.pdf-name').innerText = f.name;
                     row.querySelector('.pdf-meta').innerText = 'Tamanho: ' + f.size;
-                    
                     if(isPrepend) pdfList.prepend(row); else pdfList.appendChild(row);
                     updateCount();
                 }
@@ -350,6 +553,13 @@ app.get('/', (req, res) => {
                 function updateCount() { 
                     fileCountText.innerText = document.querySelectorAll('.pdf-item').length; 
                 }
+
+                // SOCKETS
+                socket.on('status', s => { 
+                    const el = document.getElementById('appStatus'); 
+                    el.innerText = s.message; 
+                    el.className = 'status-badge ' + (s.type === 'success' ? 'success' : 'warning'); 
+                });
 
                 socket.on('pdf_downloaded', f => addPDF(f));
                 
@@ -368,15 +578,22 @@ app.get('/', (req, res) => {
                     setTimeout(() => {
                         loadingArea.style.display = 'none'; 
                         progressBar.style.width = '0%';
+                        if (m.count > 0) {
+                            if (confirm(m.message + '\\n\\nDeseja converter esses arquivos para Markdown (.md) agora?')) {
+                                runConversion();
+                            }
+                        }
                     }, 2500);
                 });
 
-                socket.on('status', s => { 
-                    const el = document.getElementById('appStatus'); 
-                    el.innerText = s.message; 
-                    el.className = 'status-badge ' + (s.type === 'success' ? 'success' : 'warning'); 
+                socket.on('conversion_status', m => {
+                    statusLabel.innerText = m.message;
+                    if(m.type === 'end') {
+                        setTimeout(() => { loadingArea.style.display = 'none'; }, 3000);
+                    }
                 });
 
+                // CARGA INICIAL
                 async function loadDownloads() {
                     const r = await fetch('/downloads');
                     const files = await r.json();
@@ -391,15 +608,13 @@ app.get('/', (req, res) => {
                     ss.forEach(s => {
                         const item = document.createElement('div');
                         item.className = 'schedule-item';
-                        item.innerHTML = '<b>' + s.groupName + '</b><span>' + s.desc + '</span><button class="delete-sch" onclick="deleteSchedule(\\'' + s.id + '\\')">×</button>';
+                        item.innerHTML = '<b>' + s.groupName + '</b><span>' + s.desc + '</span><button class="delete-sch">×</button>';
+                        item.querySelector('.delete-sch').onclick = function() { deleteSchedule(s.id); };
                         schedulesArea.appendChild(item);
                     });
                 }
 
-                socket.on('schedule_deleted', id => {
-                    const schList = document.getElementById('scheduleList');
-                    loadSchedulesList(); // Recarrega a lista visual
-                });
+                socket.on('schedule_deleted', id => loadSchedulesList());
 
                 async function deleteSchedule(id) { 
                     if(!confirm('Deseja excluir este agendamento?')) return; 
@@ -410,13 +625,24 @@ app.get('/', (req, res) => {
                     const selected = Array.from(document.querySelectorAll('.pdf-cb:checked')).map(x => x.value);
                     if(!selected.length) return alert('Selecione arquivos primeiro.');
                     if(!confirm('Excluir ' + selected.length + ' arquivos?')) return;
-                    await fetch('/delete-downloads', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ filenames: selected }) });
-                    loadDownloads();
+                    
+                    try {
+                        await fetch('/delete-downloads', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ filenames: selected }) });
+                        if (document.getElementById('selectAll')) {
+                            document.getElementById('selectAll').checked = false;
+                        }
+                        loadDownloads();
+                    } catch(e) {
+                        alert('Erro ao excluir: ' + e.message);
+                    }
                 }
 
                 loadDownloads();
                 loadSchedulesList();
             </script>
+
+
+
         </body>
         </html>
     `);
@@ -478,14 +704,71 @@ app.delete('/schedule/:id', (req, res) => {
 
 app.post('/fetch-pdfs', async (req, res) => {
     const r = await executeDownload(req.body.groupName, req.body.dates);
-    io.emit('search_end', { message: r.message });
+    io.emit('search_end', { message: r.message, count: r.count });
     res.json(r);
+});
+
+app.post('/convert', (req, res) => {
+    const extratorPath = path.join(__dirname, 'extrator');
+    const entradaPath = path.join(extratorPath, 'Entrada');
+    
+    // Garante que a pasta Entrada existe
+    if (!fs.existsSync(entradaPath)) fs.mkdirSync(entradaPath, { recursive: true });
+
+    // Copia arquivos de PDFS_Baixados para extrator/Entrada
+    const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.endsWith('.pdf'));
+    files.forEach(f => {
+        fs.copyFileSync(path.join(DOWNLOAD_DIR, f), path.join(entradaPath, f));
+    });
+
+    if (files.length === 0) {
+        return res.json({ success: false, message: 'Nenhum PDF para converter.' });
+    }
+
+    io.emit('conversion_status', { message: `Iniciando conversão de ${files.length} arquivos...`, type: 'start' });
+
+    const pythonProcess = spawn('python', ['conversor.py'], { cwd: extratorPath });
+
+    pythonProcess.stdout.on('data', (data) => {
+        const output = data.toString();
+        console.log(`[Python]: ${output}`);
+        if (output.includes('Convertendo')) {
+            io.emit('conversion_status', { message: output.trim(), type: 'progress' });
+        }
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+        console.error(`[Python Error]: ${data}`);
+    });
+
+    pythonProcess.on('close', (code) => {
+        io.emit('conversion_status', { message: 'Conversão finalizada! Verifique a pasta extrator/Saida.', type: 'end' });
+        res.json({ success: true });
+    });
 });
 
 app.post('/stop-search', (req, res) => { shouldStopSearch = true; res.json({ success: true }); });
 app.post('/delete-downloads', (req, res) => {
-    req.body.filenames.forEach(f => { const p = path.join(DOWNLOAD_DIR, f); if(fs.existsSync(p)) fs.unlinkSync(p); });
-    res.json({ success: true });
+    let deleted = 0;
+    let errs = [];
+    if (req.body.filenames && Array.isArray(req.body.filenames)) {
+        req.body.filenames.forEach(f => { 
+            try {
+                const p = path.join(DOWNLOAD_DIR, f); 
+                if (fs.existsSync(p)) {
+                    fs.unlinkSync(p); 
+                    deleted++;
+                } else {
+                    errs.push(`${f} não encontrado.`);
+                }
+            } catch(e) {
+                console.log(`[Exclusão] Erro ao apagar ${f}: ${e.message}`);
+                errs.push(e.message);
+            }
+        });
+    }
+    console.log(`[Exclusão] ${deleted} arquivos apagados.`);
+    res.json({ success: true, deleted, errors: errs });
 });
 
 server.listen(port, () => { console.log(`Dashboard rodando em: http://localhost:${port}`); });

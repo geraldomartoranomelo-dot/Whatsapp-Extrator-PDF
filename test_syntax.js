@@ -1,17 +1,22 @@
 const fs = require('fs');
-const content = fs.readFileSync('d:\\Whatsapp Extrator PDF\\index.js', 'utf-8');
-const scriptPart = content.match(/res\.send\(`([\s\S]*?)`\);/);
-if (scriptPart) {
-    console.log("HTML length:", scriptPart[1].length);
-    try {
-        // Try to see if there's any unescaped ${} that would cause a Node crash
-        // but since node -c passed, it's not a Node syntax error.
-        // It might be a Browser syntax error.
-        const browserJS = scriptPart[1].match(/<script>([\s\S]*?)<\/script>/)[1];
-        console.log("Browser JS found");
-    } catch(e) {
-        console.log("Error finding browser JS:", e.message);
+const code = fs.readFileSync('index.js', 'utf8');
+
+// Encontra o bloco entre <script> e </script>
+const scriptStart = code.indexOf('<script>');
+const scriptEnd = code.indexOf('</script>');
+const block = code.substring(scriptStart, scriptEnd + 9);
+
+// Conta backticks
+const backticks = [];
+for (let i = 0; i < block.length; i++) {
+    if (block[i] === '`') {
+        backticks.push(i);
     }
-} else {
-    console.log("res.send template literal NOT found");
 }
+console.log('Total backticks no bloco script:', backticks.length);
+
+// Mostra contexto de cada backtick
+backticks.forEach((pos, idx) => {
+    const context = block.substring(Math.max(0, pos - 30), pos + 30);
+    console.log(`Backtick #${idx + 1} at pos ${pos}:`, JSON.stringify(context));
+});
