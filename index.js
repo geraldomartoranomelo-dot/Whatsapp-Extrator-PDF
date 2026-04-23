@@ -114,6 +114,7 @@ client.on('ready', async () => {
 });
 
 let shouldStopSearch = false;
+let activePythonProcess = null;
 
 const executeDownload = async (groupNames, targetDates) => {
     if (!isReady) { console.log('[Busca] WhatsApp não conectado.'); return { success: false, message: 'WhatsApp não conectado.' }; }
@@ -307,44 +308,45 @@ app.get('/', (req, res) => {
             <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
             <script src="https://npmcdn.com/flatpickr/dist/l10n/pt.js"></script>
             <style>
-                :root { --primary: #25d366; --dark: #075e54; --bg: #f5f7f9; --white: #ffffff; --border: #e0e0e0; }
-                body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; height: 100vh; overflow: hidden; color: #333; }
+                :root { --primary: #00a884; --dark: #e9edef; --bg: #111b21; --white: #202c33; --border: #2a3942; }
+                body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; display: flex; height: 100vh; overflow: hidden; color: #d1d7db; }
                 .sidebar { width: 350px; background: var(--white); border-right: 1px solid var(--border); padding: 25px; display: flex; flex-direction: column; overflow-y: auto; }
                 .main { flex: 1; padding: 30px; display: flex; flex-direction: column; overflow: hidden; }
-                .card { background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.02); margin-bottom: 25px; }
+                .card { background: var(--white); padding: 20px; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.2); margin-bottom: 25px; }
                 h2 { color: var(--dark); font-size: 1.1rem; margin: 0 0 20px 0; display: flex; align-items: center; gap: 10px; font-weight: 700; }
-                label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: #555; }
-                input { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; box-sizing: border-box; margin-bottom: 15px; font-size: 0.9rem; }
-                button { width: 100%; padding: 13px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 0.95rem; }
-                button:hover { background: #128c7e; transform: translateY(-1px); }
-                .btn-danger { background: #ef4444; }
+                label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: #8696a0; }
+                input { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; box-sizing: border-box; margin-bottom: 15px; font-size: 0.9rem; background: var(--bg); color: var(--dark); }
+                button { width: 100%; padding: 13px; background: var(--primary); color: #111b21; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 0.95rem; }
+                button:hover { background: #008f6f; transform: translateY(-1px); }
+                .btn-danger { background: #ef4444; color: white; }
                 .btn-danger:hover { background: #dc2626; }
                 .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
-                .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; background: #eaedf0; border-radius: 8px; font-size: 0.85rem; font-weight: 600; transition: 0.2s; }
-                .tab.active { background: var(--primary); color: white; }
+                .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; background: var(--bg); border-radius: 8px; font-size: 0.85rem; font-weight: 600; transition: 0.2s; color: #8696a0; border: 1px solid var(--border); }
+                .tab.active { background: var(--primary); color: #111b21; border-color: var(--primary); }
                 .tab-content { display: none; }
                 .tab-content.active { display: block; }
                 .days-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
-                .days-grid label { font-size: 0.75rem; display: flex; align-items: center; gap: 5px; background: #fff; border: 1px solid #ddd; padding: 6px; border-radius: 6px; cursor: pointer; user-select: none; font-weight: normal; }
+                .days-grid label { font-size: 0.75rem; display: flex; align-items: center; gap: 5px; background: var(--bg); border: 1px solid var(--border); padding: 6px; border-radius: 6px; cursor: pointer; user-select: none; font-weight: normal; color: #e9edef; }
                 .status-badge { padding: 8px 16px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; margin-bottom: 25px; display: inline-block; }
-                .success { background: #dcf8c6; color: #075e54; }
-                .warning { background: #fff3cd; color: #856404; }
-                #loading { display: none; background: #e3f2fd; padding: 20px; border-radius: 10px; text-align: center; margin-top: 15px; }
-                .progress { height: 12px; background: #cfd8dc; border-radius: 6px; overflow: hidden; margin: 15px 0; }
+                .success { background: #005c4b; color: #e9edef; }
+                .warning { background: #543f04; color: #f0e6c8; }
+                #loading { display: none; background: #182229; padding: 20px; border-radius: 10px; text-align: center; margin-top: 15px; border: 1px solid var(--border); }
+                #loadingText { color: #e9edef !important; }
+                .progress { height: 12px; background: var(--bg); border-radius: 6px; overflow: hidden; margin: 15px 0; border: 1px solid var(--border); }
                 #bar { height: 100%; width: 0%; background: var(--primary); transition: 0.4s ease; }
-                #pdfList { flex: 1; overflow-y: auto; background: white; border-radius: 12px; border: 1px solid var(--border); }
-                .pdf-item { display: flex; align-items: center; gap: 15px; padding: 15px; border-bottom: 1px solid #f0f0f0; transition: 0.2s; }
-                .pdf-item:hover { background: #f8fafb; }
-                .pdf-icon { width: 44px; height: 44px; background: #fee2e2; color: #ef4444; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-weight: 800; font-size: 0.8rem; min-width: 44px; }
+                #pdfList { flex: 1; overflow-y: auto; background: var(--white); border-radius: 12px; border: 1px solid var(--border); }
+                .pdf-item { display: flex; align-items: center; gap: 15px; padding: 15px; border-bottom: 1px solid var(--border); transition: 0.2s; }
+                .pdf-item:hover { background: var(--bg); }
+                .pdf-icon { width: 44px; height: 44px; background: #3f1d1d; color: #ef4444; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-weight: 800; font-size: 0.8rem; min-width: 44px; }
                 .pdf-info { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 4px; }
-                .pdf-name { font-weight: 600; font-size: 0.95rem; color: #1a202c; }
-                .pdf-meta { font-size: 0.8rem; color: #718096; }
-                .schedule-item { background: #fdfdfd; padding: 15px; border-radius: 10px; border: 1px dashed #cbd5e0; margin-bottom: 12px; position: relative; }
-                .schedule-item b { font-size: 0.9rem; color: #2d3748; }
-                .schedule-item span { font-size: 0.8rem; color: #718096; display: block; margin-top: 5px; }
-                .delete-sch { position: absolute; right: 10px; top: 15px; color: #e53e3e; cursor: pointer; border: none; background: none; font-size: 1.3rem; line-height: 1; }
+                .pdf-name { font-weight: 600; font-size: 0.95rem; color: var(--dark); }
+                .pdf-meta { font-size: 0.8rem; color: #8696a0; }
+                .schedule-item { background: var(--bg); padding: 15px; border-radius: 10px; border: 1px dashed var(--border); margin-bottom: 12px; position: relative; }
+                .schedule-item b { font-size: 0.9rem; color: var(--dark); }
+                .schedule-item span { font-size: 0.8rem; color: #8696a0; display: block; margin-top: 5px; }
+                .delete-sch { position: absolute; right: 10px; top: 15px; color: #e53e3e; cursor: pointer; border: none; background: none; font-size: 1.3rem; line-height: 1; width: auto; padding: 0; }
                 .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-                .selection-grp { display: flex; align-items: center; gap: 15px; background: #edf2f7; padding: 10px 18px; border-radius: 10px; }
+                .selection-grp { display: flex; align-items: center; gap: 15px; background: var(--white); padding: 10px 18px; border-radius: 10px; border: 1px solid var(--border); }
             </style>
         </head>
         <body>
@@ -398,7 +400,7 @@ app.get('/', (req, res) => {
 
             <div class="main">
                 <div class="controls">
-                    <h2>PDFs Encontrados <span id="fileCount" style="background:#e2e8f0; padding:4px 12px; border-radius:20px; font-size:0.9rem;">0</span></h2>
+                    <h2>PDFs Encontrados <span id="fileCount" style="background:var(--border); color:var(--dark); padding:4px 12px; border-radius:20px; font-size:0.9rem;">0</span></h2>
                     <div class="selection-grp">
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 600;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)"> Selecionar Todos</label>
                         <button onclick="runConversion()" style="width: auto; padding: 8px 18px; font-size: 0.85rem; background: #2563eb; color: white;">Converter para Markdown</button>
@@ -540,8 +542,8 @@ app.get('/', (req, res) => {
                     row.innerHTML = '<input type="checkbox" class="pdf-cb" style="width:20px; height:20px; min-width:20px;">' +
                                      '<div class="pdf-icon" style="margin: 0 10px;">PDF</div>' +
                                      '<div class="pdf-info">' +
-                                        '<div class="pdf-name" style="color:#333; font-weight:bold;"></div>' +
-                                        '<div class="pdf-meta" style="color:#666; font-size:0.8rem;"></div>' +
+                                        '<div class="pdf-name" style="font-weight:bold;"></div>' +
+                                        '<div class="pdf-meta"></div>' +
                                      '</div>';
                     row.querySelector('.pdf-cb').value = f.name;
                     row.querySelector('.pdf-name').innerText = f.name;
@@ -578,17 +580,20 @@ app.get('/', (req, res) => {
                     setTimeout(() => {
                         loadingArea.style.display = 'none'; 
                         progressBar.style.width = '0%';
-                        if (m.count > 0) {
-                            if (confirm(m.message + '\\n\\nDeseja converter esses arquivos para Markdown (.md) agora?')) {
-                                runConversion();
-                            }
-                        }
                     }, 2500);
                 });
 
                 socket.on('conversion_status', m => {
                     statusLabel.innerText = m.message;
+                    if(m.type === 'start') {
+                        progressBar.style.width = '0%';
+                        loadingArea.style.display = 'block';
+                    }
+                    if(m.type === 'progress' && m.percent !== undefined) {
+                        progressBar.style.width = m.percent + '%';
+                    }
                     if(m.type === 'end') {
+                        progressBar.style.width = '100%';
                         setTimeout(() => { loadingArea.style.display = 'none'; }, 3000);
                     }
                 });
@@ -597,7 +602,7 @@ app.get('/', (req, res) => {
                 async function loadDownloads() {
                     const r = await fetch('/downloads');
                     const files = await r.json();
-                    pdfList.innerHTML = files.length ? '' : '<p id="emptyMsg" style="text-align:center; color:#adb5bd; padding:60px;">Nenhum PDF encontrado ainda.</p>';
+                    pdfList.innerHTML = files.length ? '' : '<p id="emptyMsg" style="text-align:center; color:#8696a0; padding:60px;">Nenhum PDF encontrado ainda.</p>';
                     files.forEach(x => addPDF(x, false));
                 }
 
@@ -727,13 +732,24 @@ app.post('/convert', (req, res) => {
 
     io.emit('conversion_status', { message: `Iniciando conversão de ${files.length} arquivos...`, type: 'start' });
 
-    const pythonProcess = spawn('python', ['conversor.py'], { cwd: extratorPath });
+    // O parâmetro -u força o Python a não fazer buffer de saída (imprime no mesmo instante)
+    const pythonProcess = spawn('python', ['-u', 'conversor.py'], { cwd: extratorPath });
+    activePythonProcess = pythonProcess;
 
     pythonProcess.stdout.on('data', (data) => {
         const output = data.toString();
-        console.log(`[Python]: ${output}`);
-        if (output.includes('Convertendo')) {
-            io.emit('conversion_status', { message: output.trim(), type: 'progress' });
+        console.log('[Python]: ' + output.trim());
+        const lines = output.split('\n');
+        for (const line of lines) {
+            if (line.includes('Progresso:')) {
+                const match = line.match(/Progresso:\s*([\d.]+)%/);
+                if (match) {
+                    const percent = parseFloat(match[1]);
+                    const msgPart = line.split('|');
+                    const msg = msgPart.length > 1 ? msgPart[1].trim() : line.trim();
+                    io.emit('conversion_status', { message: msg + ' (' + Math.round(percent) + '%)', type: 'progress', percent });
+                }
+            }
         }
     });
 
@@ -742,12 +758,22 @@ app.post('/convert', (req, res) => {
     });
 
     pythonProcess.on('close', (code) => {
+        activePythonProcess = null;
         io.emit('conversion_status', { message: 'Conversão finalizada! Verifique a pasta extrator/Saida.', type: 'end' });
         res.json({ success: true });
     });
 });
 
-app.post('/stop-search', (req, res) => { shouldStopSearch = true; res.json({ success: true }); });
+app.post('/stop-search', (req, res) => {
+    shouldStopSearch = true;
+    if (activePythonProcess) {
+        activePythonProcess.kill();
+        activePythonProcess = null;
+        io.emit('conversion_status', { message: 'Conversão cancelada pelo usuário.', type: 'end' });
+        console.log('[Python] Processo de conversão encerrado pelo usuário.');
+    }
+    res.json({ success: true });
+});
 app.post('/delete-downloads', (req, res) => {
     let deleted = 0;
     let errs = [];

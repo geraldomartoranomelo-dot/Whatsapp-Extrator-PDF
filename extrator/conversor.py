@@ -41,16 +41,28 @@ def converter_pdfs():
             nome_saida_md = nome_base + '.md'
             caminho_saida_md = PASTA_SAIDA / nome_saida_md
             
-            # --- MODO TEXTO PURO (COM OCR) ---
-            # Extrai apenas o texto no formato Markdown estruturado (tabelas, listas, headers)
-            # Ignora completamente a extração visual de imagens (`write_images` é False)
-            # Mas ainda LÊ o texto dentro das imagens usando o Tesseract
-            os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
-            md_texto = pymupdf4llm.to_markdown(
-                str(caminho_pdf),
-                write_images=False,
-                force_text=False # Permite fallback para o OCR extrair as palavras da foto
-            )
+            # --- MODO TEXTO PURO (PÁGINA POR PÁGINA) ---
+            import fitz
+            doc = fitz.open(caminho_pdf)
+            total_pages = len(doc)
+            md_texto = ""
+            
+            os.environ["TESSDATA_PREFIX"] = r"C:\\Program Files\\Tesseract-OCR\\tessdata"
+            
+            for p in range(total_pages):
+                md_texto += pymupdf4llm.to_markdown(
+                    doc,
+                    pages=[p],
+                    write_images=False,
+                    force_text=False
+                ) + "\\n\\n"
+                
+                # Calcula o progresso milimétrico (0 a 100%)
+                pct_arquivo = (p + 1) / total_pages
+                progresso_total = ((i - 1) + pct_arquivo) / len(arquivos_pdf) * 100
+                print(f"Progresso: {progresso_total:.1f}% | Arquivo {i}/{len(arquivos_pdf)} - Página {p+1}/{total_pages}")
+                
+            doc.close()
             
             # Salva o arquivo MD principal focado em leitura de IA
             with open(caminho_saida_md, 'w', encoding='utf-8') as f_out:
